@@ -63,6 +63,11 @@ export class ReplayEngine {
     this.opts.onLog?.(msg);
   }
 
+  /** Next block to scan. Persist this to resume replay without rescanning. */
+  get nextBlock(): number {
+    return this.cursor;
+  }
+
   /** Lazily select a covering set of storage nodes for downloads. */
   private async ensureNodes(): Promise<StorageNode[]> {
     if (this.nodes.length > 0) return this.nodes;

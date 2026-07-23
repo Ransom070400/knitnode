@@ -1,7 +1,19 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { decodeEntry, streamIdForCollection, type Metric, type SearchHit } from '@knitnode/protocol';
 import { CollectionIndex } from './index-store.js';
 import { ReplayEngine, type ReplayWrite } from './replay/engine.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
+
+/** On-disk record tying a saved cursor to the collection snapshots beside it. */
+interface CheckpointManifest {
+  version: number;
+  /** Next Flow block to scan — replay resumes here instead of from genesis. */
+  nextBlock: number;
+  collections: { name: string; base: string }[];
+}
+
+const MANIFEST_FILE = 'manifest.json';
 
 export interface KnitNodeOpts {
   network?: NetworkConfig;
@@ -10,6 +22,12 @@ export interface KnitNodeOpts {
   /** Distance metric for every collection's index. Fixed for determinism. */
   metric?: Metric;
   startBlock?: number;
+  /**
+   * Directory for persisted state. When set, a cold start resumes from the
+   * saved cursor + index snapshots instead of replaying from `startBlock`, and
+   * `sync`/`watch` re-save after catching up. Omit for pure in-memory replay.
+   */
+  checkpointDir?: string;
   onLog?: (msg: string) => void;
 }
 
@@ -25,6 +43,7 @@ export interface KnitNodeOpts {
 export class KnitNode {
   private readonly network: NetworkConfig;
   private readonly metric: Metric;
+  private readonly checkpointDir?: string;
   private readonly onLog?: (msg: string) => void;
   private readonly collections = new Map<string, CollectionIndex>();
   /** streamId -> collection name, for routing replayed writes. */
@@ -35,6 +54,7 @@ export class KnitNode {
   constructor(opts: KnitNodeOpts) {
     this.network = opts.network ?? GALILEO_TESTNET;
     this.metric = opts.metric ?? 'cosine';
+    this.checkpointDir = opts.checkpointDir;
     this.onLog = opts.onLog;
 
     for (const name of opts.collections) {
@@ -42,10 +62,13 @@ export class KnitNode {
       this.streamToCollection.set(streamId, name);
     }
 
+    // Restore snapshots first; a resumed cursor overrides the configured start.
+    const resumeBlock = this.loadCheckpoint();
+
     this.engine = new ReplayEngine({
       network: this.network,
       watchedStreamIds: this.streamToCollection.keys(),
-      startBlock: opts.startBlock ?? DEFAULT_START_BLOCK,
+      startBlock: resumeBlock ?? opts.startBlock ?? DEFAULT_START_BLOCK,
       onLog: this.onLog,
     });
   }
@@ -54,6 +77,7 @@ export class KnitNode {
   async sync(): Promise<void> {
     await this.engine.catchUp((w) => this.apply(w));
     this.log(`sync complete — ${this.applied} entries across ${this.collections.size} collection(s)`);
+    this.saveCheckpoint();
   }
 
   /**
@@ -66,7 +90,61 @@ export class KnitNode {
       await delay(intervalMs, signal);
       if (signal?.aborted) break;
       await this.engine.catchUp((w) => this.apply(w));
+      this.saveCheckpoint();
     }
+  }
+
+  /**
+   * Persist the replay cursor and every collection's index under
+   * `checkpointDir`. No-op if checkpointing is disabled. Called automatically
+   * after each catch-up; safe to call manually before shutdown.
+   */
+  saveCheckpoint(): void {
+    if (!this.checkpointDir) return;
+    mkdirSync(this.checkpointDir, { recursive: true });
+
+    const collections: { name: string; base: string }[] = [];
+    let i = 0;
+    for (const [name, index] of this.collections) {
+      const base = `col-${i++}`;
+      index.saveTo(this.checkpointDir, base);
+      collections.push({ name, base });
+    }
+
+    const manifest: CheckpointManifest = {
+      version: 1,
+      nextBlock: this.engine.nextBlock,
+      collections,
+    };
+    writeFileSync(
+      join(this.checkpointDir, MANIFEST_FILE),
+      JSON.stringify(manifest, null, 2),
+    );
+    this.log(`checkpoint saved — block ${manifest.nextBlock}, ${collections.length} collection(s)`);
+  }
+
+  /**
+   * Restore snapshots for watched collections from `checkpointDir`. Returns the
+   * saved next-block so replay resumes there, or undefined if there's no
+   * checkpoint (cold start). Called from the constructor, before the engine.
+   */
+  private loadCheckpoint(): number | undefined {
+    if (!this.checkpointDir) return undefined;
+    const manifestPath = join(this.checkpointDir, MANIFEST_FILE);
+    if (!existsSync(manifestPath)) return undefined;
+
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as CheckpointManifest;
+    const watched = new Set(this.streamToCollection.values());
+    for (const entry of manifest.collections) {
+      if (!watched.has(entry.name)) continue; // not one we're watching now
+      const index = CollectionIndex.loadFrom(this.checkpointDir, entry.base);
+      this.collections.set(entry.name, index);
+      this.applied += index.size;
+    }
+    this.log(
+      `resumed from checkpoint — block ${manifest.nextBlock}, ${this.collections.size} collection(s), ${this.applied} entries`,
+    );
+    return manifest.nextBlock;
   }
 
   /** Apply one replayed write: decode the entry and upsert it into its index. */

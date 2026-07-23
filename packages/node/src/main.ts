@@ -6,10 +6,11 @@ import { GALILEO_TESTNET } from './config.js';
  * CLI entrypoint: `tsx src/main.ts <collection> [<collection> ...]`
  *
  * Env:
- *   KNIT_PORT          RPC port (default 3939)
- *   KNIT_POLL_MS       replay poll interval (default 5000)
- *   KNIT_START_BLOCK   first Flow block to scan (default 0)
- *   KNIT_*             network overrides (see config.ts)
+ *   KNIT_PORT           RPC port (default 3939)
+ *   KNIT_POLL_MS        replay poll interval (default 5000)
+ *   KNIT_START_BLOCK    first Flow block to scan (default 0)
+ *   KNIT_CHECKPOINT_DIR persist index + cursor here; resumes on restart
+ *   KNIT_*              network overrides (see config.ts)
  */
 async function main(): Promise<void> {
   const collections = process.argv.slice(2);
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
   const node = new KnitNode({
     network: GALILEO_TESTNET,
     collections,
+    checkpointDir: process.env.KNIT_CHECKPOINT_DIR,
     onLog: (msg) => console.log(`[knitnode] ${msg}`),
   });
 

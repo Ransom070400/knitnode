@@ -16,6 +16,8 @@ export interface KnitStoreOpts {
   metric?: Metric;
   /** First Flow block to scan on replay. Default from `KNIT_START_BLOCK` (0). */
   startBlock?: number;
+  /** Directory for persisted index + cursor. Enables resume across restarts. */
+  checkpointDir?: string;
   onLog?: (msg: string) => void;
 }
 
@@ -54,6 +56,7 @@ export class KnitStore {
       collections: [opts.collection],
       metric: opts.metric,
       startBlock: opts.startBlock ?? DEFAULT_START_BLOCK,
+      checkpointDir: opts.checkpointDir,
       onLog: opts.onLog,
     });
   }
