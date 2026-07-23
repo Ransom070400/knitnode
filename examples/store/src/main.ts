@@ -3,9 +3,12 @@ import { ethers } from 'ethers';
 import { KnitStore, GALILEO_TESTNET } from '@knitnode/node';
 import type { VectorEntry } from '@knitnode/protocol';
 
-// Load .env if present (dep-free; Node 20.12+/22+).
-if (existsSync(new URL('../.env', import.meta.url))) {
-  process.loadEnvFile(new URL('../.env', import.meta.url));
+// Load env (dep-free; Node 20.12+/22+). `.env.local` (gitignored — put your
+// real key there) is loaded first; loadEnvFile keeps the first value set, so it
+// wins over the committed `.env` template.
+for (const name of ['.env.local', '.env']) {
+  const url = new URL(`../${name}`, import.meta.url);
+  if (existsSync(url)) process.loadEnvFile(url);
 }
 
 const COLLECTION = 'demo-fruit';

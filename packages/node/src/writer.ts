@@ -41,7 +41,9 @@ export async function publishEntries(
   if (entries.length === 0) throw new Error('no entries to publish');
 
   const provider = new ethers.JsonRpcProvider(network.evmRpc);
-  const wallet = new ethers.Wallet(privateKey, provider);
+  // ethers requires a 0x-prefixed key; tolerate a bare 64-char hex string.
+  const normalizedKey = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+  const wallet = new ethers.Wallet(normalizedKey, provider);
   // The 0G SDK bundles ethers' CommonJS build while we import the ESM build.
   // The two `ContractRunner`/`Wallet` types are structurally identical at
   // runtime (same package, same 6.13.1) but nominally distinct to TS, so we
