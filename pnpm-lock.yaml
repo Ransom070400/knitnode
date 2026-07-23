@@ -33,6 +33,18 @@ importers:
         specifier: 6.13.1
         version: 6.13.1(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
+  examples/store:
+    dependencies:
+      '@knitnode/node':
+        specifier: workspace:*
+        version: link:../../packages/node
+      '@knitnode/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      ethers:
+        specifier: 6.13.1
+        version: 6.13.1(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+
   packages/node:
     dependencies:
       '@0gfoundation/0g-storage-ts-sdk':

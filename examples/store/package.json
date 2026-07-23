@@ -1,0 +1,15 @@
+{
+  "name": "@knitnode/example-store",
+  "version": "0.1.0",
+  "description": "Ergonomic KnitStore demo: add/sync/search in a few lines, with a persistent checkpoint.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@knitnode/node": "workspace:*",
+    "@knitnode/protocol": "workspace:*",
+    "ethers": "6.13.1"
+  }
+}
