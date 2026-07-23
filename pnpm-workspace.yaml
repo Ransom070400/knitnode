@@ -1,0 +1,10 @@
+packages:
+  - 'packages/*'
+  - 'examples/*'
+allowBuilds:
+  bufferutil: false
+  cbor-extract: true
+  es5-ext: false
+  esbuild: true
+  hnswlib-node: true
+  utf-8-validate: false

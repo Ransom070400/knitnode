@@ -1,0 +1,26 @@
+{
+  "name": "@knitnode/node",
+  "version": "0.1.0",
+  "description": "KnitNode service — replays a tagged 0G KV stream into a deterministic HNSW index and serves similarity search.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@0gfoundation/0g-storage-ts-sdk": "^1.2.10",
+    "@knitnode/protocol": "workspace:*",
+    "ethers": "6.13.1",
+    "hnswlib-node": "^3.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@knitnode/example-basic",
+  "version": "0.1.0",
+  "description": "End-to-end KnitNode demo: write vectors to 0G testnet, replay them, query top-k.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@0gfoundation/0g-storage-ts-sdk": "^1.2.10",
+    "@knitnode/node": "workspace:*",
+    "@knitnode/protocol": "workspace:*",
+    "ethers": "6.13.1"
+  }
+}

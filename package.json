@@ -1,0 +1,21 @@
+{
+  "name": "knitnode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Decentralized vector search layer on 0G Storage — a KV Node that replays into an HNSW index instead of a KV map.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "dev": "pnpm --filter @knitnode/example-basic run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
