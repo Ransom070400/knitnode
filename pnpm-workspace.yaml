@@ -1,6 +1,9 @@
 packages:
   - 'packages/*'
   - 'examples/*'
+# Which dependencies may run install/build scripts (pnpm 11 format).
+# hnswlib-node compiles a native addon (addon.node) it needs at runtime; the
+# rest are pulled in transitively and don't need to build.
 allowBuilds:
   bufferutil: false
   cbor-extract: true

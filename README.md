@@ -1,5 +1,7 @@
 # knitnode
 
+[![CI](https://github.com/Ransom070400/knitnode/actions/workflows/ci.yml/badge.svg)](https://github.com/Ransom070400/knitnode/actions/workflows/ci.yml)
+
 **A decentralized vector-search layer on [0G Storage](https://0g.ai).**
 
 knitnode is a KV node with a twist: instead of replaying a tagged 0G KV stream
@@ -166,4 +168,4 @@ format and access-control (ACL) semantics on replay are future work.
 
 ## License
 
-TBD.
+[MIT](./LICENSE) © Eze Ransom
