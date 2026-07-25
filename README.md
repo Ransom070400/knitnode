@@ -140,6 +140,14 @@ a binary HNSW snapshot per collection plus the next-block cursor (`manifest.json
 On restart it restores the snapshots and resumes scanning from the saved cursor
 instead of re-deriving from the log. Snapshot metadata must be JSON-serializable.
 
+Each snapshot carries a **content digest** — a sha256 over dim, metric, and every
+point in label order (id, vector, canonical metadata), recorded in the sidecar
+and the manifest. `loadFrom` recomputes it and refuses a snapshot whose `.hnsw`
+or `.json` was corrupted or altered. Because it's deterministic, two nodes that
+replayed the same log produce the **same digest** — a cross-node agreement
+fingerprint. (It's an integrity checksum, not a signature; authenticating a
+snapshot against a forging peer needs a signed manifest — future work.)
+
 ## Determinism
 
 Reproducible indexes are the whole point, so these are part of the protocol
@@ -163,8 +171,10 @@ contract, not tunables:
 ## Status
 
 Phase 1 (write path + replay + search + RPC) and Phase 2 (`KnitStore`) are done,
-with checkpointing. Snapshots are per-node local; a shared/verifiable snapshot
-format and access-control (ACL) semantics on replay are future work.
+with checkpointing and content-digest–verified snapshots. Remaining: a signed
+snapshot manifest (authentication, not just integrity), and access-control (ACL)
+semantics on replay — the decoder walks the control ops but doesn't yet enforce
+them, which needs the submission's sender threaded through the replay engine.
 
 ## License
 

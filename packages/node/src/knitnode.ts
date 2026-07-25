@@ -10,7 +10,7 @@ interface CheckpointManifest {
   version: number;
   /** Next Flow block to scan — replay resumes here instead of from genesis. */
   nextBlock: number;
-  collections: { name: string; base: string }[];
+  collections: { name: string; base: string; digest: string }[];
 }
 
 const MANIFEST_FILE = 'manifest.json';
@@ -103,12 +103,12 @@ export class KnitNode {
     if (!this.checkpointDir) return;
     mkdirSync(this.checkpointDir, { recursive: true });
 
-    const collections: { name: string; base: string }[] = [];
+    const collections: { name: string; base: string; digest: string }[] = [];
     let i = 0;
     for (const [name, index] of this.collections) {
       const base = `col-${i++}`;
-      index.saveTo(this.checkpointDir, base);
-      collections.push({ name, base });
+      const digest = index.saveTo(this.checkpointDir, base);
+      collections.push({ name, base, digest });
     }
 
     const manifest: CheckpointManifest = {

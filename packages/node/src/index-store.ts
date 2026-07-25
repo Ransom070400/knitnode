@@ -3,12 +3,16 @@
 import hnswlib from 'hnswlib-node';
 const { HierarchicalNSW } = hnswlib;
 type HierarchicalNSW = InstanceType<typeof HierarchicalNSW>;
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Metric, SearchHit, VectorEntry } from '@knitnode/protocol';
 import { HNSW_PARAMS } from './config.js';
 
 const INITIAL_CAPACITY = 1024;
+
+/** Digest scheme tag — bump if the canonical serialization below ever changes. */
+const DIGEST_VERSION = 'knitnode-snapshot-v1';
 
 /** Sidecar written alongside the binary HNSW graph so labels/metadata survive. */
 interface IndexSidecar {
@@ -20,6 +24,18 @@ interface IndexSidecar {
   labelToId: string[];
   /** id -> metadata. Must be JSON-serializable (true for typical embeddings). */
   metadata: Record<string, Record<string, unknown>>;
+  /** Content digest of the index at save time; verified on load. */
+  digest: string;
+}
+
+/** Stable JSON: object keys sorted recursively so the digest is order-invariant. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return `{${keys
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`)
+    .join(',')}}`;
 }
 
 /**
@@ -117,13 +133,38 @@ export class CollectionIndex {
   }
 
   /**
-   * Persist the index to `dir` as two files: `<base>.hnsw` (the binary graph)
-   * and `<base>.json` (the id/metadata sidecar hnswlib doesn't store). Returns
-   * the file base so a manifest can reference it. Creates `dir` if missing.
+   * Deterministic content digest of the index: sha256 over dim, metric, and
+   * every point in label order — its id, stored vector (LE float32), and
+   * canonical metadata. Two indexes built from the same writes in the same order
+   * produce the same digest, so it doubles as a snapshot-integrity checksum and
+   * a cross-node agreement fingerprint.
    */
-  saveTo(dir: string, base: string): void {
+  digest(): string {
+    const h = createHash('sha256');
+    h.update(`${DIGEST_VERSION}\n${this.dim}\n${this.metric}\n${this.size}\n`);
+    const buf = Buffer.allocUnsafe(this.dim * 4);
+    for (let label = 0; label < this.labelToId.length; label++) {
+      const id = this.labelToId[label];
+      if (id === undefined) continue;
+      const point = this.index.getPoint(label);
+      for (let i = 0; i < point.length; i++) buf.writeFloatLE(point[i]!, i * 4);
+      h.update(`\x00${id}\x00`);
+      h.update(buf);
+      h.update(canonicalJson(this.metadata.get(id) ?? {}));
+    }
+    return h.digest('hex');
+  }
+
+  /**
+   * Persist the index to `dir` as two files: `<base>.hnsw` (the binary graph)
+   * and `<base>.json` (the id/metadata sidecar hnswlib doesn't store, including
+   * the content digest). Returns the digest so a manifest can record it.
+   * Creates `dir` if missing.
+   */
+  saveTo(dir: string, base: string): string {
     mkdirSync(dir, { recursive: true });
     this.index.writeIndexSync(join(dir, `${base}.hnsw`));
+    const digest = this.digest();
     const sidecar: IndexSidecar = {
       name: this.name,
       dim: this.dim,
@@ -131,11 +172,17 @@ export class CollectionIndex {
       capacity: this.capacity,
       labelToId: this.labelToId,
       metadata: Object.fromEntries(this.metadata),
+      digest,
     };
     writeFileSync(join(dir, `${base}.json`), JSON.stringify(sidecar));
+    return digest;
   }
 
-  /** Reconstruct a `CollectionIndex` previously written by {@link saveTo}. */
+  /**
+   * Reconstruct a `CollectionIndex` previously written by {@link saveTo}, and
+   * verify its content digest — a mismatch means the `.hnsw` or `.json` file was
+   * corrupted or tampered with, and throws rather than loading bad state.
+   */
   static loadFrom(dir: string, base: string): CollectionIndex {
     const sidecar = JSON.parse(
       readFileSync(join(dir, `${base}.json`), 'utf8'),
@@ -149,6 +196,14 @@ export class CollectionIndex {
     idx.labelToId = sidecar.labelToId;
     idx.idToLabel = new Map(sidecar.labelToId.map((id, label) => [id, label]));
     idx.metadata = new Map(Object.entries(sidecar.metadata));
+
+    const actual = idx.digest();
+    if (sidecar.digest !== undefined && actual !== sidecar.digest) {
+      throw new Error(
+        `checkpoint digest mismatch for "${sidecar.name}" (${base}): ` +
+          `expected ${sidecar.digest}, got ${actual} — snapshot is corrupt or tampered`,
+      );
+    }
     return idx;
   }
 
