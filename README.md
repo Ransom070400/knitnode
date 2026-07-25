@@ -130,6 +130,7 @@ curl -s localhost:3939 -d '{"jsonrpc":"2.0","id":1,"method":"similaritySearch",
 | `KNIT_POLL_MS` | `5000` | Replay poll interval |
 | `KNIT_START_BLOCK` | `0` | First Flow block to scan on cold start |
 | `KNIT_CHECKPOINT_DIR` | — | Persist index + cursor here; resume on restart |
+| `KNIT_ENFORCE_ACL` | `true` | `false` indexes every write, skipping access control |
 | `KNIT_EVM_RPC` / `KNIT_FLOW_CONTRACT` / `KNIT_INDEXER_RPC` / `KNIT_CHAIN_ID` | Galileo V3 | Network overrides |
 
 ## Checkpointing
@@ -147,6 +148,24 @@ or `.json` was corrupted or altered. Because it's deterministic, two nodes that
 replayed the same log produce the **same digest** — a cross-node agreement
 fingerprint. (It's an integrity checksum, not a signature; authenticating a
 snapshot against a forging peer needs a signed manifest — future work.)
+
+## Access control
+
+Replay enforces 0G stream access control, so a collection isn't a free-for-all —
+only authorized senders' vectors are indexed (default on; disable with
+`enforceAcl: false`). The rules mirror the 0G KV node:
+
+- The **first sender** to write a stream is bootstrapped as its **admin**. In the
+  common single-writer case this is transparent — you write your own collection
+  and everything you publish is indexed.
+- A write to a **normal** key needs admin or a stream **write role**; a **special**
+  key needs admin or that key's **special-write role**.
+- Admins grant/revoke roles and mark keys special via control ops carried in the
+  same `StreamData`; unauthorized writes and ops are silently dropped on replay.
+
+The authorization identity is the **Flow submission's sender**. ACL state is part
+of replay state and is persisted in checkpoints, so a resumed node keeps enforcing
+correctly instead of forgetting who is admin.
 
 ## Determinism
 
@@ -171,10 +190,9 @@ contract, not tunables:
 ## Status
 
 Phase 1 (write path + replay + search + RPC) and Phase 2 (`KnitStore`) are done,
-with checkpointing and content-digest–verified snapshots. Remaining: a signed
-snapshot manifest (authentication, not just integrity), and access-control (ACL)
-semantics on replay — the decoder walks the control ops but doesn't yet enforce
-them, which needs the submission's sender threaded through the replay engine.
+with checkpointing, content-digest–verified snapshots, and replay-time access
+control. Remaining: a signed snapshot manifest (authentication, not just
+integrity), and horizontal scale-out (sharding a collection across nodes).
 
 ## License
 

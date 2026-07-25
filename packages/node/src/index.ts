@@ -3,6 +3,13 @@ export { KnitStore, type KnitStoreOpts } from './store.js';
 export { CollectionIndex } from './index-store.js';
 export { ReplayEngine, type ReplayWrite, type ReplayEngineOpts } from './replay/engine.js';
 export {
+  AccessControlSet,
+  AccessControlType,
+  processSubmission,
+  type AccessControlState,
+  type Submission,
+} from './replay/acl.js';
+export {
   decodeStreamData,
   decodeStreamTags,
   STREAM_DOMAIN,

@@ -18,6 +18,8 @@ export interface KnitStoreOpts {
   startBlock?: number;
   /** Directory for persisted index + cursor. Enables resume across restarts. */
   checkpointDir?: string;
+  /** Enforce 0G stream access control on replay (default true). */
+  enforceAcl?: boolean;
   onLog?: (msg: string) => void;
 }
 
@@ -57,6 +59,7 @@ export class KnitStore {
       metric: opts.metric,
       startBlock: opts.startBlock ?? DEFAULT_START_BLOCK,
       checkpointDir: opts.checkpointDir,
+      enforceAcl: opts.enforceAcl,
       onLog: opts.onLog,
     });
   }

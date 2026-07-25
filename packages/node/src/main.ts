@@ -10,6 +10,7 @@ import { GALILEO_TESTNET } from './config.js';
  *   KNIT_POLL_MS        replay poll interval (default 5000)
  *   KNIT_START_BLOCK    first Flow block to scan (default 0)
  *   KNIT_CHECKPOINT_DIR persist index + cursor here; resumes on restart
+ *   KNIT_ENFORCE_ACL    "false" to index every write, skipping access control
  *   KNIT_*              network overrides (see config.ts)
  */
 async function main(): Promise<void> {
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
     network: GALILEO_TESTNET,
     collections,
     checkpointDir: process.env.KNIT_CHECKPOINT_DIR,
+    enforceAcl: process.env.KNIT_ENFORCE_ACL !== 'false',
     onLog: (msg) => console.log(`[knitnode] ${msg}`),
   });
 

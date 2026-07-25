@@ -35,6 +35,18 @@ export interface StreamWrite {
 export interface DecodedStreamData {
   version: number;
   writes: StreamWrite[];
+  controls: StreamControl[];
+}
+
+/** One access-control operation from a StreamData submission. */
+export interface StreamControl {
+  /** AccessControlType op code (see acl.ts). */
+  type: number;
+  streamId: string; // 0x-prefixed 32-byte hex
+  /** Present for key-scoped ops (SetKeyTo*, *SpecialWriteRole). */
+  key?: Uint8Array;
+  /** Present for account-scoped ops (Grant/Revoke roles). 0x-prefixed 20-byte hex. */
+  account?: string;
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -164,20 +176,23 @@ export function decodeStreamData(buf: Uint8Array): DecodedStreamData {
     data: r.bytes(h.dataSize),
   }));
 
-  // controls — walked and discarded (Phase 1 has no ACL semantics)
+  // controls — access-control ops; surfaced so replay can enforce them.
   const controlsCount = r.u32();
+  const controls: StreamControl[] = [];
   for (let i = 0; i < controlsCount; i++) {
     const type = r.u8();
-    r.bytes(32); // streamId
+    const streamId = toHex(r.bytes(32));
     const layout = controlLayout(type);
+    const control: StreamControl = { type, streamId };
     if (layout.key) {
       const keySize = r.u24();
-      r.bytes(keySize);
+      control.key = r.bytes(keySize);
     }
-    if (layout.account) r.bytes(20);
+    if (layout.account) control.account = toHex(r.bytes(20));
+    controls.push(control);
   }
 
-  return { version, writes };
+  return { version, writes, controls };
 }
 
 /**

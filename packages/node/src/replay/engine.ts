@@ -6,11 +6,14 @@ import {
 } from '@0gfoundation/0g-storage-ts-sdk';
 import type { NetworkConfig } from '../config.js';
 import { decodeStreamData, decodeStreamTags, type StreamWrite } from './streamdata.js';
+import { AccessControlSet, processSubmission } from './acl.js';
 
 /** A KV write, tagged with the log height it was applied at (for ordering). */
 export interface ReplayWrite extends StreamWrite {
   /** Submission index on the Log Layer == deterministic insertion order. */
   logHeight: number;
+  /** Flow submission sender (tx.sender), lowercased 0x address. */
+  sender: string;
 }
 
 export interface ReplayEngineOpts {
@@ -21,6 +24,13 @@ export interface ReplayEngineOpts {
   startBlock: number;
   /** getLogs window; some RPCs cap the block span per call. */
   blockPageSize?: number;
+  /**
+   * Enforce 0G stream access control on replay (default true): only writes from
+   * an authorized sender reach the handler. Disable to index every write blindly.
+   */
+  enforceAcl?: boolean;
+  /** Resume ACL state from a checkpoint. Fresh (empty) if omitted. */
+  initialAcl?: AccessControlSet;
   onLog?: (msg: string) => void;
 }
 
@@ -43,8 +53,12 @@ export class ReplayEngine {
   private nodes: StorageNode[] = [];
   /** Next block to scan; advances as we catch up. */
   private cursor: number;
+  private readonly enforceAcl: boolean;
+  private readonly acl: AccessControlSet;
 
   constructor(private readonly opts: ReplayEngineOpts) {
+    this.enforceAcl = opts.enforceAcl ?? true;
+    this.acl = opts.initialAcl ?? new AccessControlSet();
     this.provider = new ethers.JsonRpcProvider(opts.network.evmRpc);
     // Cast around the SDK/ethers ESM-vs-CJS dual-package type mismatch; a
     // read-only provider is a valid ContractRunner at runtime.
@@ -66,6 +80,11 @@ export class ReplayEngine {
   /** Next block to scan. Persist this to resume replay without rescanning. */
   get nextBlock(): number {
     return this.cursor;
+  }
+
+  /** The replayed access-control state. Persist alongside the cursor. */
+  get accessControl(): AccessControlSet {
+    return this.acl;
   }
 
   /** Lazily select a covering set of storage nodes for downloads. */
@@ -93,7 +112,7 @@ export class ReplayEngine {
 
     // Collect matching submissions across all pages first, then process in
     // strict logHeight order — determinism depends on insertion order.
-    const pending: { logHeight: number; txSeq: number; streamHit: string }[] = [];
+    const pending: { txSeq: number; sender: string; streamIds: string[] }[] = [];
 
     for (let from = this.cursor; from <= head; from += page) {
       const to = Math.min(from + page - 1, head);
@@ -101,49 +120,69 @@ export class ReplayEngine {
       for (const ev of events) {
         const parsed = this.parseSubmit(ev);
         if (!parsed) continue;
-        const hit = parsed.streamIds.find((id) => this.watched.has(id));
-        if (!hit) continue;
-        pending.push({ logHeight: parsed.txSeq, txSeq: parsed.txSeq, streamHit: hit });
+        if (!parsed.streamIds.some((id) => this.watched.has(id))) continue;
+        pending.push(parsed);
       }
       this.log(`scanned blocks ${from}..${to} (${events.length} submissions)`);
     }
 
-    pending.sort((a, b) => a.logHeight - b.logHeight);
+    pending.sort((a, b) => a.txSeq - b.txSeq);
     this.log(`${pending.length} matching submission(s) to replay`);
 
+    let denied = 0;
     for (const item of pending) {
       const bytes = await this.downloadFile(item.txSeq);
-      const { writes } = decodeStreamData(bytes);
-      for (const w of writes) {
-        if (!this.watched.has(w.streamId.toLowerCase())) continue;
-        await handler({ ...w, logHeight: item.logHeight });
+      const { writes, controls } = decodeStreamData(bytes);
+      const isWatched = (id: string) => this.watched.has(id.toLowerCase());
+
+      const watchedWrites = writes.filter((w) => isWatched(w.streamId));
+      const emit = (w: StreamWrite) =>
+        handler({ ...w, logHeight: item.txSeq, sender: item.sender });
+
+      if (this.enforceAcl) {
+        denied += processSubmission(
+          this.acl,
+          {
+            logHeight: item.txSeq,
+            sender: item.sender,
+            streamIds: item.streamIds.filter(isWatched),
+            writes: watchedWrites,
+            controls: controls.filter((c) => isWatched(c.streamId)),
+          },
+          (w) => void emit(w),
+        );
+      } else {
+        for (const w of watchedWrites) await emit(w);
       }
     }
+    if (denied > 0) this.log(`ACL: rejected ${denied} unauthorized write(s)`);
 
     this.cursor = head + 1;
     return head;
   }
 
-  /** Decode a Submit event into txSeq + the stream ids it tags. */
+  /** Decode a Submit event into txSeq, sender, and the stream ids it tags. */
   // `ev` is a TypedEventLog; typed loosely to sidestep the ethers dual-package
   // .d.ts mismatch between the SDK (CJS) and our (ESM) ethers resolution.
   private parseSubmit(
     ev: { args?: Record<string | number, unknown> },
-  ): { txSeq: number; streamIds: string[] } | null {
+  ): { txSeq: number; sender: string; streamIds: string[] } | null {
     if (!ev.args) return null;
     const args = ev.args as {
+      sender?: string;
       submissionIndex?: bigint;
       submission?: { tags?: string };
       [k: number]: unknown;
     };
     const submission = (args.submission ?? args[5]) as { tags?: string } | undefined;
     const submissionIndex = (args.submissionIndex ?? args[2]) as bigint | undefined;
-    if (submission?.tags == null || submissionIndex == null) return null;
+    const sender = (args.sender ?? args[0]) as string | undefined;
+    if (submission?.tags == null || submissionIndex == null || sender == null) return null;
 
     const tagBytes = ethers.getBytes(submission.tags);
     const streamIds = decodeStreamTags(tagBytes).map((s) => s.toLowerCase());
     if (streamIds.length === 0) return null;
-    return { txSeq: Number(submissionIndex), streamIds };
+    return { txSeq: Number(submissionIndex), sender: sender.toLowerCase(), streamIds };
   }
 
   /**

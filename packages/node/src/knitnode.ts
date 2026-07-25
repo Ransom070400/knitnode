@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { decodeEntry, streamIdForCollection, type Metric, type SearchHit } from '@knitnode/protocol';
 import { CollectionIndex } from './index-store.js';
 import { ReplayEngine, type ReplayWrite } from './replay/engine.js';
+import { AccessControlSet, type AccessControlState } from './replay/acl.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
 
 /** On-disk record tying a saved cursor to the collection snapshots beside it. */
@@ -11,6 +12,8 @@ interface CheckpointManifest {
   /** Next Flow block to scan — replay resumes here instead of from genesis. */
   nextBlock: number;
   collections: { name: string; base: string; digest: string }[];
+  /** Replayed access-control state, so a resumed node keeps enforcing correctly. */
+  acl?: AccessControlState;
 }
 
 const MANIFEST_FILE = 'manifest.json';
@@ -28,6 +31,11 @@ export interface KnitNodeOpts {
    * `sync`/`watch` re-save after catching up. Omit for pure in-memory replay.
    */
   checkpointDir?: string;
+  /**
+   * Enforce 0G stream access control on replay (default true): only writes from
+   * an authorized sender are indexed. Set false to index every write blindly.
+   */
+  enforceAcl?: boolean;
   onLog?: (msg: string) => void;
 }
 
@@ -62,13 +70,15 @@ export class KnitNode {
       this.streamToCollection.set(streamId, name);
     }
 
-    // Restore snapshots first; a resumed cursor overrides the configured start.
-    const resumeBlock = this.loadCheckpoint();
+    // Restore snapshots first; a resumed cursor + ACL override the fresh start.
+    const restored = this.loadCheckpoint();
 
     this.engine = new ReplayEngine({
       network: this.network,
       watchedStreamIds: this.streamToCollection.keys(),
-      startBlock: resumeBlock ?? opts.startBlock ?? DEFAULT_START_BLOCK,
+      startBlock: restored?.nextBlock ?? opts.startBlock ?? DEFAULT_START_BLOCK,
+      enforceAcl: opts.enforceAcl,
+      initialAcl: restored?.acl,
       onLog: this.onLog,
     });
   }
@@ -115,6 +125,7 @@ export class KnitNode {
       version: 1,
       nextBlock: this.engine.nextBlock,
       collections,
+      acl: this.engine.accessControl.toState(),
     };
     writeFileSync(
       join(this.checkpointDir, MANIFEST_FILE),
@@ -124,11 +135,12 @@ export class KnitNode {
   }
 
   /**
-   * Restore snapshots for watched collections from `checkpointDir`. Returns the
-   * saved next-block so replay resumes there, or undefined if there's no
-   * checkpoint (cold start). Called from the constructor, before the engine.
+   * Restore snapshots + ACL for watched collections from `checkpointDir`.
+   * Returns the saved next-block and access-control state so replay resumes
+   * exactly, or undefined for a cold start. Called from the constructor, before
+   * the engine is built.
    */
-  private loadCheckpoint(): number | undefined {
+  private loadCheckpoint(): { nextBlock: number; acl?: AccessControlSet } | undefined {
     if (!this.checkpointDir) return undefined;
     const manifestPath = join(this.checkpointDir, MANIFEST_FILE);
     if (!existsSync(manifestPath)) return undefined;
@@ -144,7 +156,10 @@ export class KnitNode {
     this.log(
       `resumed from checkpoint — block ${manifest.nextBlock}, ${this.collections.size} collection(s), ${this.applied} entries`,
     );
-    return manifest.nextBlock;
+    return {
+      nextBlock: manifest.nextBlock,
+      acl: manifest.acl ? AccessControlSet.fromState(manifest.acl) : undefined,
+    };
   }
 
   /** Apply one replayed write: decode the entry and upsert it into its index. */

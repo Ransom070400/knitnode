@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { StreamDataBuilder } from '@0gfoundation/0g-storage-ts-sdk';
+import { StreamDataBuilder, StreamData } from '@0gfoundation/0g-storage-ts-sdk';
 import { streamIdForCollection, encodeEntry, entryKey } from '@knitnode/protocol';
 import {
   decodeStreamData,
@@ -82,6 +82,40 @@ test('decodeStreamTags rejects a blob with the wrong domain', () => {
   assert.deepEqual(decodeStreamTags(bad), []);
   assert.deepEqual(decodeStreamTags(new Uint8Array(0)), []);
   assert.deepEqual(decodeStreamTags(new Uint8Array(33)), []); // not a multiple of 32
+});
+
+test('decodeStreamData round-trips access-control ops against the SDK encoder', () => {
+  const ACC = '0x' + 'ab'.repeat(20);
+  const KEY = Uint8Array.from([1, 2, 3]);
+  const sd = new StreamData(1);
+  sd.Reads = [];
+  sd.Writes = [];
+  sd.Controls = [
+    { Type: 0x20, StreamId: STREAM_A, Account: ACC }, // GrantWriteRole (account)
+    { Type: 0x10, StreamId: STREAM_A, Key: KEY }, // SetKeyToSpecial (key)
+    { Type: 0x30, StreamId: STREAM_B, Key: KEY, Account: ACC }, // GrantSpecialWriteRole (key+account)
+    { Type: 0x22, StreamId: STREAM_A }, // RenounceWriteRole (neither)
+  ];
+
+  const { writes, controls } = decodeStreamData(sd.encode());
+  assert.equal(writes.length, 0);
+  assert.equal(controls.length, 4);
+
+  assert.equal(controls[0]!.type, 0x20);
+  assert.equal(controls[0]!.account, ACC);
+  assert.equal(controls[0]!.key, undefined);
+
+  assert.equal(controls[1]!.type, 0x10);
+  assert.deepEqual(controls[1]!.key && Array.from(controls[1]!.key), [1, 2, 3]);
+  assert.equal(controls[1]!.account, undefined);
+
+  assert.equal(controls[2]!.type, 0x30);
+  assert.equal(controls[2]!.account, ACC);
+  assert.deepEqual(controls[2]!.key && Array.from(controls[2]!.key), [1, 2, 3]);
+
+  assert.equal(controls[3]!.type, 0x22);
+  assert.equal(controls[3]!.key, undefined);
+  assert.equal(controls[3]!.account, undefined);
 });
 
 test('STREAM_DOMAIN matches the SDK tag prefix', () => {
