@@ -1,5 +1,19 @@
-export type { VectorEntry, SearchHit, Metric } from './types.js';
-export { encodeEntry, decodeEntry, entryKey, ENTRY_FORMAT_VERSION } from './entry.js';
+export type {
+  VectorEntry,
+  TombstoneEntry,
+  DecodedEntry,
+  SearchHit,
+  Metric,
+} from './types.js';
+export {
+  encodeEntry,
+  encodeTombstone,
+  decodeEntry,
+  isTombstone,
+  entryKey,
+  ENTRY_FORMAT_VERSION,
+  ENTRY_FLAG_TOMBSTONE,
+} from './entry.js';
 export {
   collectionTag,
   parseCollectionTag,

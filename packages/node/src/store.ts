@@ -1,6 +1,6 @@
 import type { Metric, SearchHit, VectorEntry } from '@knitnode/protocol';
 import { KnitNode } from './knitnode.js';
-import { publishEntries, type PublishResult } from './writer.js';
+import { publishDeletes, publishEntries, type PublishResult } from './writer.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
 
 export interface KnitStoreOpts {
@@ -85,6 +85,21 @@ export class KnitStore {
   ): Promise<PublishResult> {
     const vec = vector instanceof Float32Array ? vector : Float32Array.from(vector);
     return this.add([{ id, dim: vec.length, vector: vec, metadata }]);
+  }
+
+  /**
+   * Publish tombstones removing `ids` from the collection. Requires a
+   * `privateKey`. Like `add`, this only touches the log — the ids disappear
+   * from the local index on the next {@link sync}, not on return.
+   */
+  async delete(ids: string[] | string): Promise<PublishResult> {
+    if (!this.privateKey) {
+      throw new Error(
+        'KnitStore is read-only: construct with a `privateKey` to delete entries',
+      );
+    }
+    const list = typeof ids === 'string' ? [ids] : ids;
+    return publishDeletes(this.network, this.privateKey, this.collection, list);
   }
 
   /** Catch the local index up to chain head. */

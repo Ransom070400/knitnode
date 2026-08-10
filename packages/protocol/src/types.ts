@@ -17,6 +17,15 @@ export interface VectorEntry {
   metadata: Record<string, unknown>;
 }
 
+/** A decoded tombstone: a write that removes {@link id} from its collection. */
+export interface TombstoneEntry {
+  id: string;
+  deleted: true;
+}
+
+/** The result of decoding a value: either a vector entry or a tombstone. */
+export type DecodedEntry = VectorEntry | TombstoneEntry;
+
 /** A single hit returned by a similarity search. */
 export interface SearchHit {
   id: string;

@@ -6,6 +6,7 @@ import {
 } from '@0gfoundation/0g-storage-ts-sdk';
 import {
   encodeEntry,
+  encodeTombstone,
   entryKey,
   streamIdForCollection,
   type VectorEntry,
@@ -39,7 +40,45 @@ export async function publishEntries(
   entries: VectorEntry[],
 ): Promise<PublishResult> {
   if (entries.length === 0) throw new Error('no entries to publish');
+  return publishValues(
+    network,
+    privateKey,
+    collection,
+    entries.map((e) => ({ key: entryKey(e.id), value: encodeEntry(e) })),
+  );
+}
 
+/**
+ * Publish tombstones: writes that remove `ids` from the collection on replay.
+ *
+ * A delete is an ordinary KV write whose *value* is a tombstone — 0G's
+ * StreamData has no delete op, and inventing one out-of-band would break the
+ * replay-is-the-only-state property. Using the same key as the entry it retires
+ * also means access control treats a delete exactly like the write it undoes:
+ * you cannot tombstone a key you were never allowed to write.
+ */
+export async function publishDeletes(
+  network: NetworkConfig,
+  privateKey: string,
+  collection: string,
+  ids: string[],
+): Promise<PublishResult> {
+  if (ids.length === 0) throw new Error('no ids to delete');
+  return publishValues(
+    network,
+    privateKey,
+    collection,
+    ids.map((id) => ({ key: entryKey(id), value: encodeTombstone(id) })),
+  );
+}
+
+/** Shared submit path: pack pre-encoded KV values into one tagged log entry. */
+async function publishValues(
+  network: NetworkConfig,
+  privateKey: string,
+  collection: string,
+  values: { key: Uint8Array; value: Uint8Array }[],
+): Promise<PublishResult> {
   const provider = new ethers.JsonRpcProvider(network.evmRpc);
   // ethers requires a 0x-prefixed key; tolerate a bare 64-char hex string.
   const normalizedKey = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
@@ -61,8 +100,8 @@ export async function publishEntries(
 
   const streamId = streamIdForCollection(collection);
   const batcher = new Batcher(STREAM_DATA_VERSION, nodes, flow, network.evmRpc);
-  for (const entry of entries) {
-    batcher.streamDataBuilder.set(streamId, entryKey(entry.id), encodeEntry(entry));
+  for (const { key, value } of values) {
+    batcher.streamDataBuilder.set(streamId, key, value);
   }
 
   const [res, execErr] = await batcher.exec({ finalityRequired: true });
@@ -72,6 +111,6 @@ export async function publishEntries(
     txHash: res.txHash,
     rootHash: res.rootHash,
     streamId,
-    count: entries.length,
+    count: values.length,
   };
 }

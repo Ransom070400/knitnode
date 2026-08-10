@@ -16,7 +16,12 @@ export {
   type DecodedStreamData,
   type StreamWrite,
 } from './replay/streamdata.js';
-export { publishEntries, STREAM_DATA_VERSION, type PublishResult } from './writer.js';
+export {
+  publishEntries,
+  publishDeletes,
+  STREAM_DATA_VERSION,
+  type PublishResult,
+} from './writer.js';
 export { startRpcServer } from './server.js';
 export {
   GALILEO_TESTNET,

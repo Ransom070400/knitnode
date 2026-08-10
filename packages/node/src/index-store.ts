@@ -20,8 +20,12 @@ interface IndexSidecar {
   dim: number;
   metric: Metric;
   capacity: number;
-  /** label -> id, dense and in first-seen order (index position == label). */
-  labelToId: string[];
+  /**
+   * label -> id, in first-seen order (index position == label). `null` marks a
+   * label vacated by {@link CollectionIndex.delete}; holes are never compacted
+   * away, since shifting labels would fork the index.
+   */
+  labelToId: (string | null)[];
   /** id -> metadata. Must be JSON-serializable (true for typical embeddings). */
   metadata: Record<string, Record<string, unknown>>;
   /** Content digest of the index at save time; verified on load. */
@@ -52,7 +56,8 @@ export class CollectionIndex {
   private index: HierarchicalNSW;
   /** hnswlib addresses points by integer label; we assign them densely. */
   private idToLabel = new Map<string, number>();
-  private labelToId: string[] = [];
+  /** Dense by position; a `null` slot is a label retired by {@link delete}. */
+  private labelToId: (string | null)[] = [];
   private metadata = new Map<string, Record<string, unknown>>();
   private capacity = INITIAL_CAPACITY;
 
@@ -107,6 +112,28 @@ export class CollectionIndex {
     this.metadata.set(entry.id, entry.metadata);
   }
 
+  /**
+   * Remove an id from the index — the replay effect of a tombstone. Returns
+   * false if the id was never present (a delete for an unknown id is a no-op,
+   * not an error: replay must tolerate a tombstone that races its entry).
+   *
+   * The label is retired, not recycled: `labelToId[label]` becomes a permanent
+   * hole and a later re-add of the same id appends a *fresh* label. Reusing the
+   * vacated label would make label assignment depend on deletion history rather
+   * than on first-seen order, and two nodes that replayed the same log must
+   * agree on labels for their digests to match. The cost is that delete/re-add
+   * churn grows the graph; reclaiming that space means rebuilding from the log.
+   */
+  delete(id: string): boolean {
+    const label = this.idToLabel.get(id);
+    if (label === undefined) return false;
+    this.index.markDelete(label);
+    this.idToLabel.delete(id);
+    this.labelToId[label] = null;
+    this.metadata.delete(id);
+    return true;
+  }
+
   /** Top-k nearest neighbours to `query`. Returns fewer than k if the index is small. */
   search(query: Float32Array | number[], k: number): SearchHit[] {
     if (query.length !== this.dim) {
@@ -122,7 +149,7 @@ export class CollectionIndex {
     const hits: SearchHit[] = [];
     for (let i = 0; i < neighbors.length; i++) {
       const id = this.labelToId[neighbors[i]!];
-      if (id === undefined) continue;
+      if (id == null) continue; // unknown or deleted label
       hits.push({
         id,
         distance: distances[i]!,
@@ -134,10 +161,15 @@ export class CollectionIndex {
 
   /**
    * Deterministic content digest of the index: sha256 over dim, metric, and
-   * every point in label order — its id, stored vector (LE float32), and
+   * every live point in label order — its id, stored vector (LE float32), and
    * canonical metadata. Two indexes built from the same writes in the same order
    * produce the same digest, so it doubles as a snapshot-integrity checksum and
    * a cross-node agreement fingerprint.
+   *
+   * Deleted ids drop out entirely — their labels are skipped and `size` falls —
+   * so the digest describes what the collection *contains*, not how it got
+   * there. An id that was written and then tombstoned hashes identically to one
+   * that was never written, even though the two indexes differ internally.
    */
   digest(): string {
     const h = createHash('sha256');
@@ -145,7 +177,7 @@ export class CollectionIndex {
     const buf = Buffer.allocUnsafe(this.dim * 4);
     for (let label = 0; label < this.labelToId.length; label++) {
       const id = this.labelToId[label];
-      if (id === undefined) continue;
+      if (id == null) continue; // retired label — contributes nothing
       const point = this.index.getPoint(label);
       for (let i = 0; i < point.length; i++) buf.writeFloatLE(point[i]!, i * 4);
       h.update(`\x00${id}\x00`);
@@ -194,7 +226,9 @@ export class CollectionIndex {
     idx.index.readIndexSync(join(dir, `${base}.hnsw`), true);
     idx.capacity = idx.index.getMaxElements();
     idx.labelToId = sidecar.labelToId;
-    idx.idToLabel = new Map(sidecar.labelToId.map((id, label) => [id, label]));
+    idx.idToLabel = new Map(
+      sidecar.labelToId.flatMap((id, label) => (id == null ? [] : [[id, label] as const])),
+    );
     idx.metadata = new Map(Object.entries(sidecar.metadata));
 
     const actual = idx.digest();

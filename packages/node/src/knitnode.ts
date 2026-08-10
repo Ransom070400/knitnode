@@ -1,6 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { decodeEntry, streamIdForCollection, type Metric, type SearchHit } from '@knitnode/protocol';
+import {
+  decodeEntry,
+  isTombstone,
+  streamIdForCollection,
+  type Metric,
+  type SearchHit,
+} from '@knitnode/protocol';
 import { CollectionIndex } from './index-store.js';
 import { ReplayEngine, type ReplayWrite } from './replay/engine.js';
 import { AccessControlSet, type AccessControlState } from './replay/acl.js';
@@ -86,7 +92,12 @@ export class KnitNode {
   /** Catch up to chain head, replaying all pending writes into the indexes. */
   async sync(): Promise<void> {
     await this.engine.catchUp((w) => this.apply(w));
-    this.log(`sync complete — ${this.applied} entries across ${this.collections.size} collection(s)`);
+    // `applied` counts writes folded in; deletes mean that is not the same as
+    // the number of entries currently indexed, so report both.
+    const live = [...this.collections.values()].reduce((n, c) => n + c.size, 0);
+    this.log(
+      `sync complete — ${this.applied} write(s) applied, ${live} entries across ${this.collections.size} collection(s)`,
+    );
     this.saveCheckpoint();
   }
 
@@ -162,7 +173,17 @@ export class KnitNode {
     };
   }
 
-  /** Apply one replayed write: decode the entry and upsert it into its index. */
+  /**
+   * Apply one replayed write: decode the value and fold it into the collection's
+   * index — an upsert for a vector entry, a removal for a tombstone.
+   *
+   * A malformed or unindexable value is skipped rather than thrown, and that
+   * matters for more than tidiness: `apply` runs inside `catchUp`, so a throw
+   * would abort the scan before the cursor advances, and every restart would
+   * re-read the same bad write and die again — one bad value would brick the
+   * node permanently. Skipping is still deterministic, because whether a value
+   * is skipped depends only on its bytes and on replay-derived state.
+   */
   private apply(write: ReplayWrite): void {
     const collection = this.streamToCollection.get(write.streamId.toLowerCase());
     if (!collection) return; // not one of ours (shouldn't happen — engine filters)
@@ -176,13 +197,28 @@ export class KnitNode {
     }
 
     let index = this.collections.get(collection);
+
+    if (isTombstone(entry)) {
+      // A tombstone for a collection or id we've never seen is a no-op: the
+      // delete simply has nothing to undo.
+      if (index?.delete(entry.id)) this.applied++;
+      return;
+    }
+
     if (!index) {
       // First entry defines the collection's dimensionality.
       index = new CollectionIndex(collection, entry.dim, this.metric);
       this.collections.set(collection, index);
       this.log(`opened collection "${collection}" (dim ${entry.dim}, ${this.metric})`);
     }
-    index.upsert(entry);
+
+    try {
+      index.upsert(entry);
+    } catch (err) {
+      // Reachable from any authorized writer, e.g. a wrong-dimension vector.
+      this.log(`skipping unindexable entry "${entry.id}" in "${collection}" @${write.logHeight}: ${err}`);
+      return;
+    }
     this.applied++;
   }
 

@@ -1,5 +1,5 @@
 import { Encoder } from 'cbor-x';
-import type { VectorEntry } from './types.js';
+import type { DecodedEntry, TombstoneEntry, VectorEntry } from './types.js';
 
 /**
  * Per-entry binary format version. Independent of the tag version (`v1`): the
@@ -7,6 +7,13 @@ import type { VectorEntry } from './types.js';
  * a replayer can reject or up-convert entries it doesn't understand.
  */
 export const ENTRY_FORMAT_VERSION = 1;
+
+/**
+ * Header `flags` bit marking a value as a tombstone: a write that *deletes* its
+ * id from the collection on replay. A tombstone carries only the id (dim 0, no
+ * vector, no metadata) — deletion in a log-replay model is itself a log entry.
+ */
+export const ENTRY_FLAG_TOMBSTONE = 0x01;
 
 /** Header is fixed-width; variable sections follow it in order. */
 const HEADER_SIZE = 10;
@@ -81,7 +88,37 @@ export function encodeEntry(entry: VectorEntry): Uint8Array {
   return bytes;
 }
 
-export function decodeEntry(input: Uint8Array): VectorEntry {
+/**
+ * Encode a tombstone: a value that deletes `id` from its collection on replay.
+ * Layout is the entry header with the tombstone flag set, dim 0, no vector and
+ * no metadata, followed by the id bytes.
+ */
+export function encodeTombstone(id: string): Uint8Array {
+  if (!id) throw new Error('entry.id must be non-empty');
+  const idBytes = utf8Encoder.encode(id);
+  if (idBytes.length > MAX_ID_BYTES) {
+    throw new Error(`id is too long: ${idBytes.length} bytes (max ${MAX_ID_BYTES})`);
+  }
+
+  const buf = new ArrayBuffer(HEADER_SIZE + idBytes.length);
+  const view = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+
+  view.setUint8(0, ENTRY_FORMAT_VERSION);
+  view.setUint8(1, ENTRY_FLAG_TOMBSTONE);
+  view.setUint16(2, 0, true); // dim 0
+  view.setUint16(4, idBytes.length, true);
+  view.setUint32(6, 0, true); // metaLen 0
+  bytes.set(idBytes, HEADER_SIZE);
+  return bytes;
+}
+
+/** True if a decoded value is a tombstone (delete) rather than a vector entry. */
+export function isTombstone(entry: DecodedEntry): entry is TombstoneEntry {
+  return (entry as TombstoneEntry).deleted === true;
+}
+
+export function decodeEntry(input: Uint8Array): DecodedEntry {
   if (input.length < HEADER_SIZE) {
     throw new Error(`entry too short: ${input.length} < ${HEADER_SIZE}`);
   }
@@ -91,9 +128,19 @@ export function decodeEntry(input: Uint8Array): VectorEntry {
   if (formatVersion !== ENTRY_FORMAT_VERSION) {
     throw new Error(`unsupported entry format version ${formatVersion}`);
   }
+  const flags = view.getUint8(1);
   const dim = view.getUint16(2, true);
   const idLen = view.getUint16(4, true);
   const metaLen = view.getUint32(6, true);
+
+  if (flags & ENTRY_FLAG_TOMBSTONE) {
+    const expected = HEADER_SIZE + idLen; // no vector, no metadata
+    if (input.length !== expected) {
+      throw new Error(`tombstone length mismatch: got ${input.length}, expected ${expected}`);
+    }
+    const id = utf8Decoder.decode(input.subarray(HEADER_SIZE, HEADER_SIZE + idLen));
+    return { id, deleted: true };
+  }
 
   const expected = HEADER_SIZE + idLen + dim * 4 + metaLen;
   if (input.length !== expected) {

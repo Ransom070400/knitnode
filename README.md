@@ -43,7 +43,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 19 offline tests — no network or testnet key required
+pnpm test          # 46 offline tests — no network or testnet key required
 pnpm build
 ```
 
@@ -73,6 +73,9 @@ await store.upsert('cat', [1, 0, 0], { kind: 'animal' });
 await store.add([
   { id: 'kitten', dim: 3, vector: Float32Array.from([0.9, 0.1, 0]), metadata: {} },
 ]);
+
+// DELETE — publish a tombstone; the id leaves the index on the next replay
+await store.delete('kitten');
 
 // READ — replay the stream back into a local index, then search
 await store.sync();
@@ -184,15 +187,24 @@ contract, not tunables:
 - **Collection tag** — `knitnode:v1:<collection>`, projected to a 32-byte 0G stream
   id via `keccak256`.
 - **Entry** — `[version | flags | dim | idLen | metaLen | id(utf8) | vector(f32 LE) | metadata(CBOR)]`.
+- **Tombstone** — the same header with `flags` bit `0x01` set, `dim`/`metaLen` 0
+  and no payload past the id. 0G's StreamData has no delete op, so a delete is
+  an ordinary write whose *value* retires the id. Reusing the entry's key means
+  access control treats a delete exactly like the write it undoes.
 - **StreamData** — knitnode ships a decoder for 0G's `StreamData` blob (the SDK
   provides only the encoder); it's tested byte-for-byte against the SDK's `encode()`.
 
 ## Status
 
 Phase 1 (write path + replay + search + RPC) and Phase 2 (`KnitStore`) are done,
-with checkpointing, content-digest–verified snapshots, and replay-time access
-control. Remaining: a signed snapshot manifest (authentication, not just
-integrity), and horizontal scale-out (sharding a collection across nodes).
+with checkpointing, content-digest–verified snapshots, replay-time access
+control, and tombstone deletes. Remaining: a signed snapshot manifest
+(authentication, not just integrity), atomic checkpoint writes, `delete`/`stats`
+over RPC, and horizontal scale-out (sharding a collection across nodes).
+
+Deletes retire a label permanently rather than recycling it, so delete/re-add
+churn grows the graph without bound; reclaiming that space means rebuilding from
+the log. Fine for append-mostly collections, not yet for high-churn ones.
 
 ## License
 
