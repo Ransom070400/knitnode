@@ -37,9 +37,16 @@ interface CheckpointManifest {
   generation: number;
   /** Next Flow block to scan — replay resumes here instead of from genesis. */
   nextBlock: number;
-  collections: { name: string; base: string; digest: string }[];
+  collections: CheckpointEntry[];
   /** Replayed access-control state, so a resumed node keeps enforcing correctly. */
   acl?: AccessControlState;
+}
+
+/** One collection's snapshot within a generation: `<base>.hnsw` + `<base>.json`. */
+interface CheckpointEntry {
+  name: string;
+  base: string;
+  digest: string;
 }
 
 const MANIFEST_FILE = 'manifest.json';
@@ -92,8 +99,15 @@ export class KnitNode {
   private readonly streamToCollection = new Map<string, string>();
   private readonly engine: ReplayEngine;
   private applied = 0;
-  /** Generation of the committed checkpoint; the next save writes `+ 1`. */
-  private generation = 0;
+  /** The checkpoint currently on disk: its generation and the snapshots it names. */
+  private committed?: { generation: number; collections: CheckpointEntry[] };
+  /**
+   * Whether any index has been mutated since the committed generation was
+   * written. Set by {@link apply}, which is the only thing that touches an
+   * index — including when it merely *opens* a collection, since an empty
+   * collection still has to appear in the generation the manifest names.
+   */
+  private indexesDirty = false;
 
   constructor(opts: KnitNodeOpts) {
     this.network = opts.network ?? GALILEO_TESTNET;
@@ -163,26 +177,22 @@ export class KnitNode {
    * is still intact and still current; after it lands the whole new checkpoint
    * is live at once. A half-written snapshot can therefore never be loaded, so
    * the individual snapshot writes need no atomicity of their own.
+   *
+   * A poll that replayed nothing still has to persist its advanced cursor, but
+   * has no reason to rewrite megabytes of unchanged HNSW graph to do it. When
+   * the indexes are untouched the generation on disk still describes them
+   * exactly, so the save reuses it and rewrites only the manifest — the cursor
+   * and ACL live there anyway. Idle nodes then cost one small atomic write per
+   * poll instead of a full snapshot dump.
    */
   saveCheckpoint(): void {
     if (!this.checkpointDir) return;
     const dir = this.checkpointDir;
     mkdirSync(dir, { recursive: true });
 
-    const generation = this.generation + 1;
-    const genDir = join(dir, `${GENERATION_PREFIX}${generation}`);
-    // Clear anything an earlier aborted save left at this generation: it is
-    // unreferenced by definition, since the manifest still names the last one.
-    rmSync(genDir, { recursive: true, force: true });
-    mkdirSync(genDir, { recursive: true });
-
-    const collections: { name: string; base: string; digest: string }[] = [];
-    let i = 0;
-    for (const [name, index] of this.collections) {
-      const base = `col-${i++}`;
-      const digest = index.saveTo(genDir, base);
-      collections.push({ name, base, digest });
-    }
+    const reused = this.reusableGeneration();
+    const generation = reused?.generation ?? (this.committed?.generation ?? 0) + 1;
+    const collections = reused?.collections ?? this.writeGeneration(dir, generation);
 
     const manifest: CheckpointManifest = {
       version: MANIFEST_VERSION,
@@ -193,10 +203,52 @@ export class KnitNode {
     };
     // The commit point.
     writeFileAtomic(dir, MANIFEST_FILE, JSON.stringify(manifest, null, 2));
-    this.generation = generation;
+    this.committed = { generation, collections };
+    this.indexesDirty = false;
 
+    if (reused) {
+      this.log(`cursor saved — block ${manifest.nextBlock} (generation ${generation} unchanged)`);
+      return;
+    }
     this.pruneGenerations(dir, generation);
     this.log(`checkpoint saved — block ${manifest.nextBlock}, ${collections.length} collection(s)`);
+  }
+
+  /**
+   * The committed generation, if it still describes the live indexes and can be
+   * reused as-is. Requires both that nothing mutated an index and that the
+   * committed snapshots line up one-for-one with the collections now open —
+   * the second check is what keeps a manifest from ever naming a snapshot that
+   * was never written, however the first one might be wrong.
+   */
+  private reusableGeneration():
+    | { generation: number; collections: CheckpointEntry[] }
+    | undefined {
+    if (this.indexesDirty || !this.committed) return undefined;
+    const { collections } = this.committed;
+    if (collections.length !== this.collections.size) return undefined;
+    let i = 0;
+    for (const name of this.collections.keys()) {
+      if (collections[i++]!.name !== name) return undefined;
+    }
+    return this.committed;
+  }
+
+  /** Dump every open collection into a fresh `gen-<n>` directory. */
+  private writeGeneration(dir: string, generation: number): CheckpointEntry[] {
+    const genDir = join(dir, `${GENERATION_PREFIX}${generation}`);
+    // Clear anything an earlier aborted save left at this generation: it is
+    // unreferenced by definition, since the manifest still names the last one.
+    rmSync(genDir, { recursive: true, force: true });
+    mkdirSync(genDir, { recursive: true });
+
+    const collections: CheckpointEntry[] = [];
+    let i = 0;
+    for (const [name, index] of this.collections) {
+      const base = `col-${i++}`;
+      collections.push({ name, base, digest: index.saveTo(genDir, base) });
+    }
+    return collections;
   }
 
   /**
@@ -239,6 +291,7 @@ export class KnitNode {
 
     const genDir = join(this.checkpointDir, `${GENERATION_PREFIX}${manifest.generation}`);
     const watched = new Set(this.streamToCollection.values());
+    const loaded: CheckpointEntry[] = [];
     for (const entry of manifest.collections) {
       if (!watched.has(entry.name)) continue; // not one we're watching now
       const index = CollectionIndex.loadFrom(genDir, entry.base);
@@ -255,10 +308,13 @@ export class KnitNode {
       }
       this.collections.set(entry.name, index);
       this.applied += index.size;
+      loaded.push(entry);
     }
-    // Keep counting up from what's on disk so the next save lands in a fresh
-    // generation instead of overwriting the one we just loaded.
-    this.generation = manifest.generation;
+    // Record what's on disk, so the next save either reuses this generation or
+    // counts past it — never overwrites the one we just loaded. `loaded` rather
+    // than `manifest.collections` because snapshots we skipped are not ours to
+    // keep vouching for.
+    this.committed = { generation: manifest.generation, collections: loaded };
     this.log(
       `resumed from checkpoint — block ${manifest.nextBlock}, ${this.collections.size} collection(s), ${this.applied} entries`,
     );
@@ -296,7 +352,10 @@ export class KnitNode {
     if (isTombstone(entry)) {
       // A tombstone for a collection or id we've never seen is a no-op: the
       // delete simply has nothing to undo.
-      if (index?.delete(entry.id)) this.applied++;
+      if (index?.delete(entry.id)) {
+        this.applied++;
+        this.indexesDirty = true;
+      }
       return;
     }
 
@@ -304,6 +363,10 @@ export class KnitNode {
       // First entry defines the collection's dimensionality.
       index = new CollectionIndex(collection, entry.dim, this.metric);
       this.collections.set(collection, index);
+      // Opening a collection is itself a change worth checkpointing: the next
+      // save must produce a generation that contains it, even if the upsert
+      // below turns out to be unindexable and leaves it empty.
+      this.indexesDirty = true;
       this.log(`opened collection "${collection}" (dim ${entry.dim}, ${this.metric})`);
     }
 
@@ -315,6 +378,7 @@ export class KnitNode {
       return;
     }
     this.applied++;
+    this.indexesDirty = true;
   }
 
   /** Top-k similarity search within a collection. */

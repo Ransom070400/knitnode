@@ -43,7 +43,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 56 offline tests — no network or testnet key required
+pnpm test          # 59 offline tests — no network or testnet key required
 pnpm build
 ```
 
@@ -161,6 +161,12 @@ mid-save can leave debris but never a loadable half-state — no new index besid
 stale cursor, no snapshot torn in place. Superseded generations are pruned after
 the swap.
 
+A poll that scans new blocks but replays no writes still has to persist how far it
+got, and doesn't rewrite the graph to do it: with the indexes untouched, the
+generation on disk still describes them, so the save reuses it and rewrites only
+the manifest — the cursor and ACL live there anyway. An idle save is O(1) in
+collection size where a full one is O(n·dim); at 400 × 768 that is already ~4×.
+
 Each snapshot carries a **content digest** — a sha256 over dim, metric, and every
 point in label order (id, vector, canonical metadata), recorded in the sidecar
 and the manifest. `loadFrom` recomputes it and refuses a snapshot whose `.hnsw`
@@ -224,11 +230,6 @@ with checkpointing, content-digest–verified snapshots, replay-time access
 control, tombstone deletes, and atomically committed checkpoints. Remaining: a
 signed snapshot manifest (authentication, not just integrity), `delete`/`stats`
 over RPC, and horizontal scale-out (sharding a collection across nodes).
-
-Every save writes a full generation, so a node watching a large collection
-rewrites every snapshot on each poll even when nothing was replayed. Skipping the
-snapshot rewrite when no writes landed — persisting only the advanced cursor —
-is the obvious next optimization.
 
 Deletes retire a label permanently rather than recycling it, so delete/re-add
 churn grows the graph without bound; reclaiming that space means rebuilding from
