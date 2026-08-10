@@ -43,7 +43,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 53 offline tests — no network or testnet key required
+pnpm test          # 56 offline tests — no network or testnet key required
 pnpm build
 ```
 
@@ -144,6 +144,23 @@ a binary HNSW snapshot per collection plus the next-block cursor (`manifest.json
 On restart it restores the snapshots and resumes scanning from the saved cursor
 instead of re-deriving from the log. Snapshot metadata must be JSON-serializable.
 
+A checkpoint is **committed atomically**. Its parts only mean anything together —
+a cursor, an ACL, and one snapshot pair per collection — so each save writes its
+snapshots into a fresh generation directory nothing references yet, then swaps in
+`manifest.json` with `rename`:
+
+```
+.knit-checkpoints/
+  manifest.json     ← names a generation; replacing it commits the whole thing
+  gen-7/            ← col-0.hnsw, col-0.json, col-1.hnsw, …
+```
+
+Until that rename lands the new files are invisible and the previous checkpoint is
+still current; after it lands the whole new checkpoint is live at once. So a crash
+mid-save can leave debris but never a loadable half-state — no new index beside a
+stale cursor, no snapshot torn in place. Superseded generations are pruned after
+the swap.
+
 Each snapshot carries a **content digest** — a sha256 over dim, metric, and every
 point in label order (id, vector, canonical metadata), recorded in the sidecar
 and the manifest. `loadFrom` recomputes it and refuses a snapshot whose `.hnsw`
@@ -204,9 +221,14 @@ contract, not tunables:
 
 Phase 1 (write path + replay + search + RPC) and Phase 2 (`KnitStore`) are done,
 with checkpointing, content-digest–verified snapshots, replay-time access
-control, and tombstone deletes. Remaining: a signed snapshot manifest
-(authentication, not just integrity), atomic checkpoint writes, `delete`/`stats`
+control, tombstone deletes, and atomically committed checkpoints. Remaining: a
+signed snapshot manifest (authentication, not just integrity), `delete`/`stats`
 over RPC, and horizontal scale-out (sharding a collection across nodes).
+
+Every save writes a full generation, so a node watching a large collection
+rewrites every snapshot on each poll even when nothing was replayed. Skipping the
+snapshot rewrite when no writes landed — persisting only the advanced cursor —
+is the obvious next optimization.
 
 Deletes retire a label permanently rather than recycling it, so delete/re-add
 churn grows the graph without bound; reclaiming that space means rebuilding from

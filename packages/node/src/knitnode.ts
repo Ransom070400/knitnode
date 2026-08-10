@@ -1,4 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import {
   decodeEntry,
@@ -12,9 +23,18 @@ import { ReplayEngine, type ReplayWrite } from './replay/engine.js';
 import { AccessControlSet, type AccessControlState } from './replay/acl.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
 
-/** On-disk record tying a saved cursor to the collection snapshots beside it. */
+/**
+ * On-disk record tying a saved cursor to the collection snapshots it describes.
+ *
+ * The manifest is the *only* file at the root of a checkpoint directory; every
+ * snapshot lives in a generation subdirectory it names. Replacing the manifest
+ * is therefore the single commit point for a whole checkpoint — see
+ * {@link KnitNode.saveCheckpoint}.
+ */
 interface CheckpointManifest {
   version: number;
+  /** Generation subdirectory (`gen-<n>`) holding this manifest's snapshots. */
+  generation: number;
   /** Next Flow block to scan — replay resumes here instead of from genesis. */
   nextBlock: number;
   collections: { name: string; base: string; digest: string }[];
@@ -23,6 +43,9 @@ interface CheckpointManifest {
 }
 
 const MANIFEST_FILE = 'manifest.json';
+/** Bumped when the on-disk layout changes; older checkpoints are discarded. */
+const MANIFEST_VERSION = 2;
+const GENERATION_PREFIX = 'gen-';
 
 export interface KnitNodeOpts {
   network?: NetworkConfig;
@@ -69,6 +92,8 @@ export class KnitNode {
   private readonly streamToCollection = new Map<string, string>();
   private readonly engine: ReplayEngine;
   private applied = 0;
+  /** Generation of the committed checkpoint; the next save writes `+ 1`. */
+  private generation = 0;
 
   constructor(opts: KnitNodeOpts) {
     this.network = opts.network ?? GALILEO_TESTNET;
@@ -124,30 +149,71 @@ export class KnitNode {
    * Persist the replay cursor and every collection's index under
    * `checkpointDir`. No-op if checkpointing is disabled. Called automatically
    * after each catch-up; safe to call manually before shutdown.
+   *
+   * A checkpoint is a set of files that only mean anything together — a cursor,
+   * an ACL, and one snapshot pair per collection — so saving them one at a time
+   * leaves windows where the directory describes a state that never existed. A
+   * crash between the snapshots and the manifest used to leave new indexes
+   * beside an old cursor and an old ACL: silently inconsistent, and it survived
+   * restarts because nothing on disk looked wrong.
+   *
+   * So each save writes its snapshots into a *fresh* generation directory that
+   * nothing references yet, then swaps the manifest in with `rename`. Until
+   * that rename lands the new files are invisible and the previous checkpoint
+   * is still intact and still current; after it lands the whole new checkpoint
+   * is live at once. A half-written snapshot can therefore never be loaded, so
+   * the individual snapshot writes need no atomicity of their own.
    */
   saveCheckpoint(): void {
     if (!this.checkpointDir) return;
-    mkdirSync(this.checkpointDir, { recursive: true });
+    const dir = this.checkpointDir;
+    mkdirSync(dir, { recursive: true });
+
+    const generation = this.generation + 1;
+    const genDir = join(dir, `${GENERATION_PREFIX}${generation}`);
+    // Clear anything an earlier aborted save left at this generation: it is
+    // unreferenced by definition, since the manifest still names the last one.
+    rmSync(genDir, { recursive: true, force: true });
+    mkdirSync(genDir, { recursive: true });
 
     const collections: { name: string; base: string; digest: string }[] = [];
     let i = 0;
     for (const [name, index] of this.collections) {
       const base = `col-${i++}`;
-      const digest = index.saveTo(this.checkpointDir, base);
+      const digest = index.saveTo(genDir, base);
       collections.push({ name, base, digest });
     }
 
     const manifest: CheckpointManifest = {
-      version: 1,
+      version: MANIFEST_VERSION,
+      generation,
       nextBlock: this.engine.nextBlock,
       collections,
       acl: this.engine.accessControl.toState(),
     };
-    writeFileSync(
-      join(this.checkpointDir, MANIFEST_FILE),
-      JSON.stringify(manifest, null, 2),
-    );
+    // The commit point.
+    writeFileAtomic(dir, MANIFEST_FILE, JSON.stringify(manifest, null, 2));
+    this.generation = generation;
+
+    this.pruneGenerations(dir, generation);
     this.log(`checkpoint saved — block ${manifest.nextBlock}, ${collections.length} collection(s)`);
+  }
+
+  /**
+   * Delete generation directories the committed manifest no longer names. Best
+   * effort: the checkpoint is already durable, so a failure here costs disk
+   * space, not correctness.
+   */
+  private pruneGenerations(dir: string, keep: number): void {
+    const current = `${GENERATION_PREFIX}${keep}`;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith(GENERATION_PREFIX) || name === current) continue;
+        rmSync(join(dir, name), { recursive: true, force: true });
+      }
+    } catch (err) {
+      this.log(`could not prune old checkpoint generations: ${err}`);
+    }
   }
 
   /**
@@ -162,10 +228,20 @@ export class KnitNode {
     if (!existsSync(manifestPath)) return undefined;
 
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as CheckpointManifest;
+    if (manifest.version !== MANIFEST_VERSION) {
+      // An older layout describes streams this build can no longer derive, so
+      // there is nothing to salvage. Cold start is slow but correct.
+      this.log(
+        `ignoring checkpoint in format version ${manifest.version} (expected ${MANIFEST_VERSION}) — starting cold`,
+      );
+      return undefined;
+    }
+
+    const genDir = join(this.checkpointDir, `${GENERATION_PREFIX}${manifest.generation}`);
     const watched = new Set(this.streamToCollection.values());
     for (const entry of manifest.collections) {
       if (!watched.has(entry.name)) continue; // not one we're watching now
-      const index = CollectionIndex.loadFrom(this.checkpointDir, entry.base);
+      const index = CollectionIndex.loadFrom(genDir, entry.base);
       // The manifest keys on collection name alone, but the metric is part of
       // the tag — so a same-named snapshot built under a different metric came
       // from a different stream entirely. Refuse it loudly rather than resume
@@ -180,6 +256,9 @@ export class KnitNode {
       this.collections.set(entry.name, index);
       this.applied += index.size;
     }
+    // Keep counting up from what's on disk so the next save lands in a fresh
+    // generation instead of overwriting the one we just loaded.
+    this.generation = manifest.generation;
     this.log(
       `resumed from checkpoint — block ${manifest.nextBlock}, ${this.collections.size} collection(s), ${this.applied} entries`,
     );
@@ -259,6 +338,44 @@ export class KnitNode {
 
   private log(msg: string): void {
     this.onLog?.(msg);
+  }
+}
+
+/**
+ * Replace `dir/name` with `contents` in one step: write a sibling temp file,
+ * flush it to disk, then `rename` it over the target. Rename within a directory
+ * is atomic, so a reader sees either the whole old file or the whole new one,
+ * never a partial write — and the `fsync` before it means the bytes are really
+ * on disk before they become reachable under the real name.
+ */
+function writeFileAtomic(dir: string, name: string, contents: string): void {
+  const target = join(dir, name);
+  const tmp = `${target}.tmp`;
+  const fd = openSync(tmp, 'w');
+  try {
+    writeFileSync(fd, contents);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, target);
+  syncDirectory(dir);
+}
+
+/**
+ * Flush a directory entry so the rename itself survives power loss. Best
+ * effort: fsync on a directory is not portable (Windows rejects it), and
+ * without it the rename is still atomic, just not guaranteed durable.
+ */
+function syncDirectory(dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dir, 'r');
+    fsyncSync(fd);
+  } catch {
+    // Unsupported on this platform or filesystem — nothing to do about it.
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
