@@ -20,4 +20,5 @@ export {
   streamIdForCollection,
   TAG_NAMESPACE,
   TAG_VERSION,
+  DEFAULT_METRIC,
 } from './tags.js';

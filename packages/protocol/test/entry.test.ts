@@ -111,17 +111,41 @@ test('entryKey is the utf-8 encoding of the id', () => {
 });
 
 test('collection tag and stream id are deterministic', () => {
-  assert.equal(collectionTag('memories'), 'knitnode:v1:memories');
-  assert.deepEqual(parseCollectionTag('knitnode:v1:memories'), {
+  assert.equal(collectionTag('memories'), 'knitnode:v2:cosine:memories');
+  assert.deepEqual(parseCollectionTag('knitnode:v2:cosine:memories'), {
     namespace: 'knitnode',
-    version: 'v1',
+    version: 'v2',
+    metric: 'cosine',
     collection: 'memories',
   });
-  assert.equal(parseCollectionTag('other:v1:x'), null);
+  assert.equal(parseCollectionTag('other:v2:cosine:x'), null);
+  assert.equal(parseCollectionTag('knitnode:v1:memories'), null, 'v1 layout is not ours');
+  assert.equal(parseCollectionTag('knitnode:v2:manhattan:x'), null, 'unknown metric');
 
   const a = streamIdForCollection('memories');
   const b = streamIdForCollection('memories');
   assert.equal(a, b);
   assert.match(a, /^0x[0-9a-f]{64}$/);
   assert.notEqual(a, streamIdForCollection('other'));
+});
+
+test('the metric is part of collection identity, not node-local config', () => {
+  // The whole point: nodes that disagree about the metric derive different
+  // stream ids, so they read different data instead of building divergent
+  // indexes over the same data and answering different top-k.
+  const cosine = streamIdForCollection('memories', 'cosine');
+  const l2 = streamIdForCollection('memories', 'l2');
+  const ip = streamIdForCollection('memories', 'ip');
+
+  assert.equal(new Set([cosine, l2, ip]).size, 3, 'each metric is a distinct stream');
+  assert.equal(cosine, streamIdForCollection('memories'), 'cosine is the default');
+  assert.equal(collectionTag('memories', 'l2'), 'knitnode:v2:l2:memories');
+});
+
+test('collectionTag rejects an unknown metric and a name that would forge one', () => {
+  assert.throws(() => collectionTag('memories', 'manhattan' as never), /unknown metric/);
+  // ':' in the name is already rejected, which is what stops "x:l2" from
+  // parsing back as a different metric.
+  assert.throws(() => collectionTag('l2:memories'), /must not contain/);
+  assert.throws(() => collectionTag(''));
 });

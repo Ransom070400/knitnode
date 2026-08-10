@@ -9,6 +9,8 @@ import {
   encodeTombstone,
   entryKey,
   streamIdForCollection,
+  DEFAULT_METRIC,
+  type Metric,
   type VectorEntry,
 } from '@knitnode/protocol';
 import type { NetworkConfig } from './config.js';
@@ -31,6 +33,10 @@ export interface PublishResult {
  * id, and the whole set is submitted as ONE tagged log entry. A KnitNode
  * watching that stream will replay these writes into its HNSW index.
  *
+ * `metric` selects the stream, not just the reader's behaviour — it is part of
+ * the collection tag — so it must match the metric the replaying node watches
+ * or the writes land on a stream nobody is reading.
+ *
  * This is the Phase-1 write path; the ergonomic `KnitStore` wrapper is Phase 2.
  */
 export async function publishEntries(
@@ -38,6 +44,7 @@ export async function publishEntries(
   privateKey: string,
   collection: string,
   entries: VectorEntry[],
+  metric: Metric = DEFAULT_METRIC,
 ): Promise<PublishResult> {
   if (entries.length === 0) throw new Error('no entries to publish');
   return publishValues(
@@ -45,6 +52,7 @@ export async function publishEntries(
     privateKey,
     collection,
     entries.map((e) => ({ key: entryKey(e.id), value: encodeEntry(e) })),
+    metric,
   );
 }
 
@@ -62,6 +70,7 @@ export async function publishDeletes(
   privateKey: string,
   collection: string,
   ids: string[],
+  metric: Metric = DEFAULT_METRIC,
 ): Promise<PublishResult> {
   if (ids.length === 0) throw new Error('no ids to delete');
   return publishValues(
@@ -69,6 +78,7 @@ export async function publishDeletes(
     privateKey,
     collection,
     ids.map((id) => ({ key: entryKey(id), value: encodeTombstone(id) })),
+    metric,
   );
 }
 
@@ -78,6 +88,7 @@ async function publishValues(
   privateKey: string,
   collection: string,
   values: { key: Uint8Array; value: Uint8Array }[],
+  metric: Metric,
 ): Promise<PublishResult> {
   const provider = new ethers.JsonRpcProvider(network.evmRpc);
   // ethers requires a 0x-prefixed key; tolerate a bare 64-char hex string.
@@ -98,7 +109,7 @@ async function publishValues(
     throw new Error(`failed to select storage nodes: ${err ?? 'none available'}`);
   }
 
-  const streamId = streamIdForCollection(collection);
+  const streamId = streamIdForCollection(collection, metric);
   const batcher = new Batcher(STREAM_DATA_VERSION, nodes, flow, network.evmRpc);
   for (const { key, value } of values) {
     batcher.streamDataBuilder.set(streamId, key, value);

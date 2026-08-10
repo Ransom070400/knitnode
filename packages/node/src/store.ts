@@ -1,4 +1,4 @@
-import type { Metric, SearchHit, VectorEntry } from '@knitnode/protocol';
+import { DEFAULT_METRIC, type Metric, type SearchHit, type VectorEntry } from '@knitnode/protocol';
 import { KnitNode } from './knitnode.js';
 import { publishDeletes, publishEntries, type PublishResult } from './writer.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
@@ -12,7 +12,10 @@ export interface KnitStoreOpts {
    * store — search and sync work without it; only publishing needs a key.
    */
   privateKey?: string;
-  /** Distance metric for the index. Fixed for determinism. Default `cosine`. */
+  /**
+   * Distance metric for the index. Part of the collection tag, so it selects
+   * which stream this store reads *and* writes. Default `cosine`.
+   */
   metric?: Metric;
   /** First Flow block to scan on replay. Default from `KNIT_START_BLOCK` (0). */
   startBlock?: number;
@@ -45,18 +48,21 @@ export interface KnitStoreOpts {
  */
 export class KnitStore {
   readonly collection: string;
+  /** Metric this store reads and writes under. Part of the collection tag. */
+  readonly metric: Metric;
   private readonly network: NetworkConfig;
   private readonly privateKey?: string;
   private readonly node: KnitNode;
 
   constructor(opts: KnitStoreOpts) {
     this.collection = opts.collection;
+    this.metric = opts.metric ?? DEFAULT_METRIC;
     this.network = opts.network ?? GALILEO_TESTNET;
     this.privateKey = opts.privateKey;
     this.node = new KnitNode({
       network: this.network,
       collections: [opts.collection],
-      metric: opts.metric,
+      metric: this.metric,
       startBlock: opts.startBlock ?? DEFAULT_START_BLOCK,
       checkpointDir: opts.checkpointDir,
       enforceAcl: opts.enforceAcl,
@@ -71,7 +77,7 @@ export class KnitStore {
         'KnitStore is read-only: construct with a `privateKey` to publish entries',
       );
     }
-    return publishEntries(this.network, this.privateKey, this.collection, entries);
+    return publishEntries(this.network, this.privateKey, this.collection, entries, this.metric);
   }
 
   /**
@@ -99,7 +105,7 @@ export class KnitStore {
       );
     }
     const list = typeof ids === 'string' ? [ids] : ids;
-    return publishDeletes(this.network, this.privateKey, this.collection, list);
+    return publishDeletes(this.network, this.privateKey, this.collection, list, this.metric);
   }
 
   /** Catch the local index up to chain head. */

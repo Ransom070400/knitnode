@@ -43,7 +43,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 46 offline tests — no network or testnet key required
+pnpm test          # 53 offline tests — no network or testnet key required
 pnpm build
 ```
 
@@ -181,11 +181,17 @@ contract, not tunables:
   `config.ts`). Changing them forks the index; version them into the tag if you must.
 - **Little-endian, fixed-width wire format** (`protocol/entry.ts`) so bytes are
   identical across architectures.
+- **Metric is in the tag**, not node config, so it cannot be set inconsistently:
+  `l2` and `cosine` over the same collection name are two separate streams. A
+  checkpoint built under one metric is refused by a node configured for another.
 
 ## Wire format
 
-- **Collection tag** — `knitnode:v1:<collection>`, projected to a 32-byte 0G stream
-  id via `keccak256`.
+- **Collection tag** — `knitnode:v2:<metric>:<collection>`, projected to a 32-byte
+  0G stream id via `keccak256`. The metric is in the tag because it is part of
+  the determinism contract: two nodes that disagree about it derive *different*
+  stream ids and read different data, rather than folding the same log into
+  divergent indexes that answer different top-k for identical queries.
 - **Entry** — `[version | flags | dim | idLen | metaLen | id(utf8) | vector(f32 LE) | metadata(CBOR)]`.
 - **Tombstone** — the same header with `flags` bit `0x01` set, `dim`/`metaLen` 0
   and no payload past the id. 0G's StreamData has no delete op, so a delete is

@@ -28,7 +28,12 @@ export interface KnitNodeOpts {
   network?: NetworkConfig;
   /** Collections to watch. Their stream ids are derived and subscribed to. */
   collections: string[];
-  /** Distance metric for every collection's index. Fixed for determinism. */
+  /**
+   * Distance metric for every collection's index. Part of the collection tag,
+   * so it selects *which stream* each name resolves to — a node watching
+   * `memories` under `l2` and one watching it under `cosine` are reading two
+   * different streams, not disagreeing about one. Default `cosine`.
+   */
   metric?: Metric;
   startBlock?: number;
   /**
@@ -72,7 +77,7 @@ export class KnitNode {
     this.onLog = opts.onLog;
 
     for (const name of opts.collections) {
-      const streamId = streamIdForCollection(name).toLowerCase();
+      const streamId = streamIdForCollection(name, this.metric).toLowerCase();
       this.streamToCollection.set(streamId, name);
     }
 
@@ -161,6 +166,17 @@ export class KnitNode {
     for (const entry of manifest.collections) {
       if (!watched.has(entry.name)) continue; // not one we're watching now
       const index = CollectionIndex.loadFrom(this.checkpointDir, entry.base);
+      // The manifest keys on collection name alone, but the metric is part of
+      // the tag — so a same-named snapshot built under a different metric came
+      // from a different stream entirely. Refuse it loudly rather than resume
+      // onto state this node could never have replayed.
+      if (index.metric !== this.metric) {
+        throw new Error(
+          `checkpoint for "${entry.name}" was built under metric "${index.metric}", ` +
+            `but this node is configured for "${this.metric}" — these are different ` +
+            `collections; use a separate checkpointDir`,
+        );
+      }
       this.collections.set(entry.name, index);
       this.applied += index.size;
     }
