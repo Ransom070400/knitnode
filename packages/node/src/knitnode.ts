@@ -20,6 +20,8 @@ import {
 } from '@knitnode/protocol';
 import { CollectionIndex } from './index-store.js';
 import { ReplayEngine, type ReplayWrite } from './replay/engine.js';
+import { ZeroGSource } from './replay/zerog.js';
+import type { ReplaySource } from './replay/source.js';
 import { AccessControlSet, type AccessControlState } from './replay/acl.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
 
@@ -77,6 +79,11 @@ export interface KnitNodeOpts {
    * an authorized sender are indexed. Set false to index every write blindly.
    */
   enforceAcl?: boolean;
+  /**
+   * Where replay reads the log from. Defaults to 0G via {@link ZeroGSource};
+   * substitute one to replay a synthetic log without a chain.
+   */
+  source?: ReplaySource;
   onLog?: (msg: string) => void;
 }
 
@@ -124,7 +131,7 @@ export class KnitNode {
     const restored = this.loadCheckpoint();
 
     this.engine = new ReplayEngine({
-      network: this.network,
+      source: opts.source ?? new ZeroGSource({ network: this.network, onLog: this.onLog }),
       watchedStreamIds: this.streamToCollection.keys(),
       startBlock: restored?.nextBlock ?? opts.startBlock ?? DEFAULT_START_BLOCK,
       enforceAcl: opts.enforceAcl,

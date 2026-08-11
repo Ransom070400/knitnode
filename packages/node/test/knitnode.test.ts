@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import type { Metric, VectorEntry } from '@knitnode/protocol';
 import { CollectionIndex } from '../src/index-store.js';
 import { KnitNode } from '../src/knitnode.js';
+import { ALICE, entry, FakeLog, OTHER, put } from './fake-log.js';
 
 /**
  * Checkpoint restore and commit, exercised through `KnitNode` itself.
@@ -62,22 +63,6 @@ function readManifest(dir: string): {
   return JSON.parse(readFileSync(join(dir, MANIFEST), 'utf8'));
 }
 
-/**
- * Stand-in for replay. `apply` is private and the engine needs a chain, so
- * tests reach in to mutate indexes the way a replayed write would. Drop this
- * once the replay source is injectable and the real path can be driven offline.
- */
-interface NodeInternals {
-  collections: Map<string, CollectionIndex>;
-  indexesDirty: boolean;
-  /** The engine's scan cursor, which only a real `catchUp` would advance. */
-  engine: { cursor: number };
-}
-
-function asReplayed(node: KnitNode): NodeInternals {
-  return node as unknown as NodeInternals;
-}
-
 function withTempDir(fn: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'knit-node-'));
   try {
@@ -85,6 +70,11 @@ function withTempDir(fn: (dir: string) => void): void {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function withTempDirAsync(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'knit-node-'));
+  return fn(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
 }
 
 test('a cold start with no checkpoint has no collections', () => {
@@ -155,20 +145,19 @@ test('a corrupt snapshot is refused rather than silently resumed', () => {
   });
 });
 
-test('a save after replay commits a new generation and retires the old one', () => {
-  withTempDir((dir) => {
+test('a save after replay commits a new generation and retires the old one', async () => {
+  await withTempDirAsync(async (dir) => {
     writeCheckpoint(dir, 'memories', 'cosine', { generation: 1, nextBlock: 42 });
 
-    const node = new KnitNode({ collections: ['memories'], checkpointDir: dir });
-    const inner = asReplayed(node);
-    inner.collections.get('memories')!.upsert({
-      id: 'kitten',
-      dim: 3,
-      vector: Float32Array.from([0.9, 0.1, 0]),
-      metadata: { kind: 'animal' },
+    // Resume at block 42, then replay one new submission — sync() checkpoints.
+    const log = new FakeLog().writes({
+      txSeq: 1,
+      block: 50,
+      sender: ALICE,
+      values: [put(entry('kitten', [0.9, 0.1, 0], { kind: 'animal' }))],
     });
-    inner.indexesDirty = true;
-    node.saveCheckpoint();
+    const node = new KnitNode({ collections: ['memories'], checkpointDir: dir, source: log });
+    await node.sync();
 
     const manifest = readManifest(dir);
     assert.equal(manifest.generation, 2, 'a save never overwrites the generation it loaded');
@@ -186,19 +175,27 @@ test('a save after replay commits a new generation and retires the old one', () 
   });
 });
 
-test('a save that replayed nothing rewrites only the manifest', () => {
-  withTempDir((dir) => {
+test('a save that replayed nothing rewrites only the manifest', async () => {
+  await withTempDirAsync(async (dir) => {
     writeCheckpoint(dir, 'memories', 'cosine', { generation: 1, nextBlock: 42 });
     // A sentinel inside the generation: a full save would build gen-2 and prune
     // gen-1, taking this with it.
     writeFileSync(join(dir, 'gen-1', 'sentinel'), 'untouched');
 
-    const node = new KnitNode({ collections: ['memories'], checkpointDir: dir });
-    node.saveCheckpoint();
-    // The whole point: a poll that scanned new blocks but replayed no writes
-    // still has to persist how far it got, without rewriting the graph to do it.
-    asReplayed(node).engine.cursor = 9001;
-    node.saveCheckpoint();
+    // The chain moved on by 9000 blocks, and the only traffic was somebody
+    // else's stream — exactly the poll this optimization is for.
+    const log = new FakeLog()
+      .writes({
+        txSeq: 1,
+        block: 100,
+        sender: ALICE,
+        streamId: OTHER,
+        values: [put(entry('theirs', [1, 0, 0]))],
+      })
+      .advanceTo(9000);
+
+    const node = new KnitNode({ collections: ['memories'], checkpointDir: dir, source: log });
+    await node.sync();
 
     assert.equal(readManifest(dir).nextBlock, 9001, 'the advanced cursor is persisted');
     assert.equal(readManifest(dir).generation, 1, 'the generation on disk is reused');
@@ -207,28 +204,30 @@ test('a save that replayed nothing rewrites only the manifest', () => {
 
     // And a restart resumes from the advanced cursor, not the stale one.
     const logs: string[] = [];
-    new KnitNode({ collections: ['memories'], checkpointDir: dir, onLog: (m) => logs.push(m) });
+    const reopened = new KnitNode({
+      collections: ['memories'],
+      checkpointDir: dir,
+      onLog: (m) => logs.push(m),
+    });
     assert.ok(logs.some((m) => /block 9001/.test(m)), 'resumes at the saved cursor');
-
-    // Still a valid checkpoint.
-    assert.equal(
-      new KnitNode({ collections: ['memories'], checkpointDir: dir }).stats()[0]!.size,
-      2,
-    );
+    assert.equal(reopened.stats()[0]!.size, 2, 'still a valid checkpoint');
   });
 });
 
-test('a collection opened without any indexed write still forces a new generation', () => {
+test('generation reuse is refused when the live collections do not match', () => {
   withTempDir((dir) => {
     writeCheckpoint(dir, 'memories', 'cosine', { generation: 1, nextBlock: 42 });
 
-    // Replay can register a collection and then skip its first entry as
-    // unindexable, leaving it empty. If a save reused the old generation here,
-    // the manifest would name a snapshot that was never written — so the reuse
-    // check compares the committed snapshots against the live collections, not
-    // just a mutation flag.
+    // Reuse is gated on a dirty flag *and* on the committed snapshots matching
+    // the live collections. This exercises the second gate alone: a collection
+    // appears without the flag being set, and the save must still write a
+    // generation — otherwise the manifest would name a snapshot that does not
+    // exist. Reaching in is the point; no replay path can set up this state.
     const node = new KnitNode({ collections: ['memories'], checkpointDir: dir });
-    asReplayed(node).collections.set('other', new CollectionIndex('other', 3, 'cosine'));
+    (node as unknown as { collections: Map<string, CollectionIndex> }).collections.set(
+      'other',
+      new CollectionIndex('other', 3, 'cosine'),
+    );
     node.saveCheckpoint();
 
     const manifest = readManifest(dir);
@@ -253,8 +252,8 @@ test('the first save of a cold node writes a generation, later idle ones do not'
   });
 });
 
-test('a save interrupted before the manifest swap leaves the old checkpoint intact', () => {
-  withTempDir((dir) => {
+test('a save interrupted before the manifest swap leaves the old checkpoint intact', async () => {
+  await withTempDirAsync(async (dir) => {
     writeCheckpoint(dir, 'memories', 'cosine', { generation: 1, nextBlock: 42 });
 
     // Simulate a crash partway through writing generation 2: snapshot files
@@ -265,21 +264,23 @@ test('a save interrupted before the manifest swap leaves the old checkpoint inta
 
     // The committed manifest still names gen-1, so the node resumes from it and
     // never touches the debris.
-    const node = new KnitNode({ collections: ['memories'], checkpointDir: dir });
+    const log = new FakeLog().advanceTo(50);
+    const node = new KnitNode({ collections: ['memories'], checkpointDir: dir, source: log });
     assert.equal(node.stats()[0]!.size, 2);
 
-    // An idle save leaves the debris alone — it is unreferenced either way.
-    node.saveCheckpoint();
-    assert.equal(readManifest(dir).nextBlock, 42, 'the old cursor is still current');
+    // An idle sync leaves the debris alone — it is unreferenced either way.
+    await node.sync();
     assert.equal(readManifest(dir).generation, 1);
+    assert.ok(existsSync(join(partial, 'col-0.hnsw')), 'debris is simply ignored');
 
     // The next save that has something to write claims gen-2, clearing it
     // rather than trusting whatever was left there.
-    asReplayed(node).indexesDirty = true;
-    node.saveCheckpoint();
+    log.writes({ txSeq: 1, block: 60, sender: ALICE, values: [put(entry('kitten', [0.9, 0.1, 0]))] });
+    await node.sync();
+
     assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith('gen-')), ['gen-2']);
     assert.equal(readFileSync(join(dir, 'gen-2', 'col-0.hnsw')).includes('truncated'), false);
-    assert.equal(new KnitNode({ collections: ['memories'], checkpointDir: dir }).stats()[0]!.size, 2);
+    assert.equal(new KnitNode({ collections: ['memories'], checkpointDir: dir }).stats()[0]!.size, 3);
   });
 });
 

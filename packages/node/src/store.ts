@@ -1,5 +1,6 @@
 import { DEFAULT_METRIC, type Metric, type SearchHit, type VectorEntry } from '@knitnode/protocol';
 import { KnitNode } from './knitnode.js';
+import type { ReplaySource } from './replay/source.js';
 import { publishDeletes, publishEntries, type PublishResult } from './writer.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
 
@@ -23,6 +24,8 @@ export interface KnitStoreOpts {
   checkpointDir?: string;
   /** Enforce 0G stream access control on replay (default true). */
   enforceAcl?: boolean;
+  /** Where replay reads the log from. Defaults to 0G. */
+  source?: ReplaySource;
   onLog?: (msg: string) => void;
 }
 
@@ -66,6 +69,7 @@ export class KnitStore {
       startBlock: opts.startBlock ?? DEFAULT_START_BLOCK,
       checkpointDir: opts.checkpointDir,
       enforceAcl: opts.enforceAcl,
+      source: opts.source,
       onLog: opts.onLog,
     });
   }

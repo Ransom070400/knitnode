@@ -34,7 +34,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 | Package | What |
 |---|---|
 | `packages/protocol` | Binary entry codec, collection tags, deterministic stream-id derivation. Zero network deps. |
-| `packages/node` | `KnitNode` replay engine, `CollectionIndex` (HNSW), `writer`, JSON-RPC `server`, `KnitStore` façade, checkpointing. |
+| `packages/node` | `KnitNode` replay engine, `CollectionIndex` (HNSW), `writer`, JSON-RPC `server`, `KnitStore` façade, checkpointing. The chain sits behind a `ReplaySource`, so the fold runs against a synthetic log too. |
 | `examples/basic` | Low-level end-to-end demo: `publishEntries` → `KnitNode` → `similaritySearch`. |
 | `examples/store` | Ergonomic demo: `KnitStore.add`/`sync`/`search`, with a persistent checkpoint. |
 
@@ -43,7 +43,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 59 offline tests — no network or testnet key required
+pnpm test          # 69 offline tests — no network or testnet key required
 pnpm build
 ```
 
