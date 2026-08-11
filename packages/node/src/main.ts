@@ -11,6 +11,8 @@ import { GALILEO_TESTNET } from './config.js';
  *   KNIT_START_BLOCK    first Flow block to scan (default 0)
  *   KNIT_CHECKPOINT_DIR persist index + cursor here; resumes on restart
  *   KNIT_ENFORCE_ACL    "false" to index every write, skipping access control
+ *   KNIT_SIGNING_KEY    sign checkpoint manifests with this key
+ *   KNIT_TRUSTED_SIGNERS comma-separated addresses whose checkpoints to accept
  *   KNIT_*              network overrides (see config.ts)
  */
 async function main(): Promise<void> {
@@ -28,6 +30,10 @@ async function main(): Promise<void> {
     collections,
     checkpointDir: process.env.KNIT_CHECKPOINT_DIR,
     enforceAcl: process.env.KNIT_ENFORCE_ACL !== 'false',
+    signingKey: process.env.KNIT_SIGNING_KEY,
+    trustedSigners: process.env.KNIT_TRUSTED_SIGNERS?.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     onLog: (msg) => console.log(`[knitnode] ${msg}`),
   });
 

@@ -22,34 +22,14 @@ import { CollectionIndex } from './index-store.js';
 import { ReplayEngine, type ReplayWrite } from './replay/engine.js';
 import { ZeroGSource } from './replay/zerog.js';
 import type { ReplaySource } from './replay/source.js';
-import { AccessControlSet, type AccessControlState } from './replay/acl.js';
+import { AccessControlSet } from './replay/acl.js';
+import {
+  signManifest,
+  verifyManifest,
+  type CheckpointEntry,
+  type CheckpointManifest,
+} from './manifest.js';
 import { DEFAULT_START_BLOCK, GALILEO_TESTNET, type NetworkConfig } from './config.js';
-
-/**
- * On-disk record tying a saved cursor to the collection snapshots it describes.
- *
- * The manifest is the *only* file at the root of a checkpoint directory; every
- * snapshot lives in a generation subdirectory it names. Replacing the manifest
- * is therefore the single commit point for a whole checkpoint — see
- * {@link KnitNode.saveCheckpoint}.
- */
-interface CheckpointManifest {
-  version: number;
-  /** Generation subdirectory (`gen-<n>`) holding this manifest's snapshots. */
-  generation: number;
-  /** Next Flow block to scan — replay resumes here instead of from genesis. */
-  nextBlock: number;
-  collections: CheckpointEntry[];
-  /** Replayed access-control state, so a resumed node keeps enforcing correctly. */
-  acl?: AccessControlState;
-}
-
-/** One collection's snapshot within a generation: `<base>.hnsw` + `<base>.json`. */
-interface CheckpointEntry {
-  name: string;
-  base: string;
-  digest: string;
-}
 
 const MANIFEST_FILE = 'manifest.json';
 /** Bumped when the on-disk layout changes; older checkpoints are discarded. */
@@ -84,6 +64,19 @@ export interface KnitNodeOpts {
    * substitute one to replay a synthetic log without a chain.
    */
   source?: ReplaySource;
+  /**
+   * Private key used to sign checkpoint manifests. A signed checkpoint is
+   * attributable: whoever loads it can tell which key produced it, rather than
+   * only that the files agree with themselves. Omit to write unsigned ones.
+   */
+  signingKey?: string;
+  /**
+   * Addresses whose checkpoints this node will load. Set it and an unsigned or
+   * differently-signed checkpoint is refused — the point of naming trusted
+   * signers is lost if anything unsigned still loads. Leave it unset to accept
+   * unsigned checkpoints (a broken signature is refused either way).
+   */
+  trustedSigners?: string[];
   onLog?: (msg: string) => void;
 }
 
@@ -100,6 +93,8 @@ export class KnitNode {
   private readonly network: NetworkConfig;
   private readonly metric: Metric;
   private readonly checkpointDir?: string;
+  private readonly signingKey?: string;
+  private readonly trustedSigners?: string[];
   private readonly onLog?: (msg: string) => void;
   private readonly collections = new Map<string, CollectionIndex>();
   /** streamId -> collection name, for routing replayed writes. */
@@ -120,6 +115,8 @@ export class KnitNode {
     this.network = opts.network ?? GALILEO_TESTNET;
     this.metric = opts.metric ?? 'cosine';
     this.checkpointDir = opts.checkpointDir;
+    this.signingKey = opts.signingKey;
+    this.trustedSigners = opts.trustedSigners;
     this.onLog = opts.onLog;
 
     for (const name of opts.collections) {
@@ -201,13 +198,16 @@ export class KnitNode {
     const generation = reused?.generation ?? (this.committed?.generation ?? 0) + 1;
     const collections = reused?.collections ?? this.writeGeneration(dir, generation);
 
-    const manifest: CheckpointManifest = {
+    let manifest: CheckpointManifest = {
       version: MANIFEST_VERSION,
       generation,
       nextBlock: this.engine.nextBlock,
       collections,
       acl: this.engine.accessControl.toState(),
     };
+    // Sign last: the signature covers every other field, including the digests
+    // that bind the snapshots just written.
+    if (this.signingKey) manifest = signManifest(manifest, this.signingKey);
     // The commit point.
     writeFileAtomic(dir, MANIFEST_FILE, JSON.stringify(manifest, null, 2));
     this.committed = { generation, collections };
@@ -296,12 +296,20 @@ export class KnitNode {
       return undefined;
     }
 
+    // Before anything is read off disk: establish who produced this. A
+    // signature covers the digests below, so verifying it here means the
+    // snapshot checks that follow are checks against an attributable claim
+    // rather than against whatever the file happens to say about itself.
+    const signer = verifyManifest(manifest, { trustedSigners: this.trustedSigners });
+    if (signer) this.log(`checkpoint signed by ${signer}`);
+    else if (this.checkpointDir) this.log('checkpoint is unsigned — integrity only, not attributable');
+
     const genDir = join(this.checkpointDir, `${GENERATION_PREFIX}${manifest.generation}`);
     const watched = new Set(this.streamToCollection.values());
     const loaded: CheckpointEntry[] = [];
     for (const entry of manifest.collections) {
       if (!watched.has(entry.name)) continue; // not one we're watching now
-      const index = CollectionIndex.loadFrom(genDir, entry.base);
+      const index = CollectionIndex.loadFrom(genDir, entry.base, entry.digest);
       // The manifest keys on collection name alone, but the metric is part of
       // the tag — so a same-named snapshot built under a different metric came
       // from a different stream entirely. Refuse it loudly rather than resume

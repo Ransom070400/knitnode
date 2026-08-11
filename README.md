@@ -43,7 +43,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 69 offline tests — no network or testnet key required
+pnpm test          # 84 offline tests — no network or testnet key required
 pnpm build
 ```
 
@@ -134,6 +134,8 @@ curl -s localhost:3939 -d '{"jsonrpc":"2.0","id":1,"method":"similaritySearch",
 | `KNIT_START_BLOCK` | `0` | First Flow block to scan on cold start |
 | `KNIT_CHECKPOINT_DIR` | — | Persist index + cursor here; resume on restart |
 | `KNIT_ENFORCE_ACL` | `true` | `false` indexes every write, skipping access control |
+| `KNIT_SIGNING_KEY` | — | Sign checkpoint manifests with this key |
+| `KNIT_TRUSTED_SIGNERS` | — | Comma-separated addresses whose checkpoints load |
 | `KNIT_EVM_RPC` / `KNIT_FLOW_CONTRACT` / `KNIT_INDEXER_RPC` / `KNIT_CHAIN_ID` | Galileo V3 | Network overrides |
 
 ## Checkpointing
@@ -172,8 +174,47 @@ point in label order (id, vector, canonical metadata), recorded in the sidecar
 and the manifest. `loadFrom` recomputes it and refuses a snapshot whose `.hnsw`
 or `.json` was corrupted or altered. Because it's deterministic, two nodes that
 replayed the same log produce the **same digest** — a cross-node agreement
-fingerprint. (It's an integrity checksum, not a signature; authenticating a
-snapshot against a forging peer needs a signed manifest — future work.)
+fingerprint.
+
+### Signed checkpoints
+
+A digest says a snapshot is intact. It doesn't say *whose* it is — which starts
+mattering as soon as a checkpoint might have come from somewhere other than your
+own disk. Set `signingKey` and the manifest is signed (EIP-191 / secp256k1, so
+the signer is an Ethereum address — the same identity namespace the ACL already
+uses for admins and writers):
+
+```ts
+const node = new KnitNode({
+  collections: ['memories'],
+  checkpointDir: '.knit-checkpoints',
+  signingKey: process.env.KNIT_SIGNING_KEY,   // sign what I produce
+  trustedSigners: ['0xabc…'],                 // only load what they produced
+});
+```
+
+The signature covers every other manifest field, canonically serialized under a
+domain tag — including each collection's snapshot digest. That chain is the whole
+point: **signature → manifest → digest → snapshot bytes**. Loading recomputes each
+digest and checks it against the *manifest's* record, not just the snapshot's own
+sidecar, so a forger cannot swap in a different index that merely agrees with
+itself.
+
+Trust policy is explicit:
+
+| `trustedSigners` | unsigned | signed by a listed key | signed by anyone else | signature broken |
+|---|---|---|---|---|
+| unset | loads | loads | loads | **refused** |
+| set | **refused** | loads | **refused** | **refused** |
+
+A broken signature is fatal regardless — "not vouched for" and "vouched for and
+then edited" are different things. `KnitStore` signs with its `privateKey` by
+default, so the key that writes a collection also vouches for the snapshots it
+produces; pass `signingKey: null` to opt out.
+
+This authenticates a snapshot; it does not yet *distribute* one. Fetching a peer's
+checkpoint over the wire is the remaining half — but the artifact is now portable
+and attributable, which was the blocker.
 
 ## Access control
 
@@ -227,9 +268,16 @@ contract, not tunables:
 
 Phase 1 (write path + replay + search + RPC) and Phase 2 (`KnitStore`) are done,
 with checkpointing, content-digest–verified snapshots, replay-time access
-control, tombstone deletes, and atomically committed checkpoints. Remaining: a
-signed snapshot manifest (authentication, not just integrity), `delete`/`stats`
-over RPC, and horizontal scale-out (sharding a collection across nodes).
+control, tombstone deletes, atomically committed checkpoints, and signed
+snapshot manifests. Remaining: snapshot *distribution* — serving and fetching a
+peer's checkpoint, so a new node can join without replaying from genesis — plus
+`delete`/`stats` over RPC and horizontal scale-out (sharding a collection across
+nodes).
+
+Everything above is exercised offline. The 0G-facing half (`ZeroGSource`) has no
+test coverage and has not been run against Galileo since the tag moved to v2 —
+which changed every stream id. Validating a live round-trip is the next thing
+worth doing, ahead of any new feature.
 
 Deletes retire a label permanently rather than recycling it, so delete/re-add
 churn grows the graph without bound; reclaiming that space means rebuilding from

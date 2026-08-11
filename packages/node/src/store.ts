@@ -26,6 +26,15 @@ export interface KnitStoreOpts {
   enforceAcl?: boolean;
   /** Where replay reads the log from. Defaults to 0G. */
   source?: ReplaySource;
+  /**
+   * Key used to sign checkpoint manifests. Defaults to `privateKey`, so a store
+   * that can write a collection also vouches for the snapshots it produces
+   * under the same identity the ACL knows it by. Pass a different key to
+   * separate the two, or `null` to write unsigned checkpoints.
+   */
+  signingKey?: string | null;
+  /** Addresses whose checkpoints this store will load. See `KnitNodeOpts`. */
+  trustedSigners?: string[];
   onLog?: (msg: string) => void;
 }
 
@@ -70,6 +79,8 @@ export class KnitStore {
       checkpointDir: opts.checkpointDir,
       enforceAcl: opts.enforceAcl,
       source: opts.source,
+      signingKey: opts.signingKey === null ? undefined : opts.signingKey ?? opts.privateKey,
+      trustedSigners: opts.trustedSigners,
       onLog: opts.onLog,
     });
   }

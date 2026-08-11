@@ -8,6 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Metric, SearchHit, VectorEntry } from '@knitnode/protocol';
 import { HNSW_PARAMS } from './config.js';
+import { canonicalJson } from './canonical.js';
 
 const INITIAL_CAPACITY = 1024;
 
@@ -30,16 +31,6 @@ interface IndexSidecar {
   metadata: Record<string, Record<string, unknown>>;
   /** Content digest of the index at save time; verified on load. */
   digest: string;
-}
-
-/** Stable JSON: object keys sorted recursively so the digest is order-invariant. */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  return `{${keys
-    .map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`)
-    .join(',')}}`;
 }
 
 /**
@@ -214,8 +205,14 @@ export class CollectionIndex {
    * Reconstruct a `CollectionIndex` previously written by {@link saveTo}, and
    * verify its content digest — a mismatch means the `.hnsw` or `.json` file was
    * corrupted or tampered with, and throws rather than loading bad state.
+   *
+   * `expectedDigest` is the digest an outside record (a manifest) says this
+   * snapshot should have. Checking it is what makes that record *bind* the
+   * bytes: the sidecar's own digest only proves the pair is self-consistent, so
+   * a forger could swap in a different snapshot that agrees with itself. Both
+   * comparisons share the one recomputation, so the second is free.
    */
-  static loadFrom(dir: string, base: string): CollectionIndex {
+  static loadFrom(dir: string, base: string, expectedDigest?: string): CollectionIndex {
     const sidecar = JSON.parse(
       readFileSync(join(dir, `${base}.json`), 'utf8'),
     ) as IndexSidecar;
@@ -236,6 +233,12 @@ export class CollectionIndex {
       throw new Error(
         `checkpoint digest mismatch for "${sidecar.name}" (${base}): ` +
           `expected ${sidecar.digest}, got ${actual} — snapshot is corrupt or tampered`,
+      );
+    }
+    if (expectedDigest !== undefined && actual !== expectedDigest) {
+      throw new Error(
+        `checkpoint digest mismatch for "${sidecar.name}" (${base}): manifest records ` +
+          `${expectedDigest}, snapshot is ${actual} — the snapshot is not the one the manifest describes`,
       );
     }
     return idx;

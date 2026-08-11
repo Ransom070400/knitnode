@@ -26,6 +26,15 @@ export {
 } from './writer.js';
 export { startRpcServer } from './server.js';
 export {
+  signManifest,
+  verifyManifest,
+  signingPayload,
+  type CheckpointManifest,
+  type CheckpointEntry,
+  type VerifyOpts,
+} from './manifest.js';
+export { canonicalJson } from './canonical.js';
+export {
   GALILEO_TESTNET,
   HNSW_PARAMS,
   DEFAULT_START_BLOCK,
