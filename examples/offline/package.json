@@ -1,0 +1,16 @@
+{
+  "name": "@knitnode/example-offline",
+  "version": "0.1.0",
+  "description": "The whole pipeline with no chain and no key: synthetic log, replay, search, delete, signed checkpoint, and the browser console.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "serve": "tsx src/main.ts --serve"
+  },
+  "dependencies": {
+    "@knitnode/node": "workspace:*",
+    "@knitnode/protocol": "workspace:*",
+    "ethers": "6.13.1"
+  }
+}

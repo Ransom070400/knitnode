@@ -35,6 +35,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 |---|---|
 | `packages/protocol` | Binary entry codec, collection tags, deterministic stream-id derivation. Zero network deps. |
 | `packages/node` | `KnitNode` replay engine, `CollectionIndex` (HNSW), `writer`, JSON-RPC `server`, `KnitStore` façade, checkpointing. The chain sits behind a `ReplaySource`, so the fold runs against a synthetic log too. |
+| `examples/offline` | **Start here.** The whole pipeline with no chain and no key. |
 | `examples/basic` | Low-level end-to-end demo: `publishEntries` → `KnitNode` → `similaritySearch`. |
 | `examples/store` | Ergonomic demo: `KnitStore.add`/`sync`/`search`, with a persistent checkpoint. |
 
@@ -43,7 +44,7 @@ This is a pnpm monorepo (`type: module`, Node ≥ 20).
 ```bash
 pnpm install       # hnswlib-node compiles a native addon here (needs a C++ toolchain)
 pnpm typecheck
-pnpm test          # 84 offline tests — no network or testnet key required
+pnpm test          # 90 offline tests — no network or testnet key required
 pnpm build
 ```
 
@@ -54,6 +55,22 @@ pnpm build
 > ```
 
 ## Quickstart
+
+### Run it with no chain and no key
+
+A KnitNode is a deterministic fold over an ordered log; `MemorySource` supplies
+that log from memory instead of 0G. Everything downstream is the real path —
+same tag filtering, ordering, access control, decoding, indexing, checkpointing.
+
+```bash
+pnpm --filter @knitnode/example-offline dev      # replay, search, delete, resume
+pnpm --filter @knitnode/example-offline serve    # …and leave the console up
+```
+
+It replays a four-vector collection, has an unauthorized writer rejected by the
+ACL, overwrites one vector and tombstones another, restarts from a signed
+checkpoint, and checks that an independent node replaying the same log answers
+identically.
 
 ### Ergonomic: `KnitStore` (recommended)
 
@@ -116,8 +133,23 @@ submissions:
 |---|---|---|
 | `similaritySearch` | `{ collection, queryVector, k }` | `SearchHit[]` |
 | `collections` | — | per-collection `{ collection, dim, size, metric }` |
+| `status` | — | `{ nextBlock, applied, collections }` — replay progress |
 
 `GET /health` → `{ status: "ok" }`.
+
+### Console
+
+`GET /` serves a browser console: collections, replay progress, and similarity
+search against any of them. It's served by the same process that answers the
+RPC, so it's same-origin — nothing to configure, no CORS, no second server. Open
+<http://localhost:3939> once a node is running.
+
+Query vectors come from your embedding model; paste one as a JSON array, or hit
+*Random vector* to smoke-test a collection whose dimensionality you can't type by
+hand.
+
+> The RPC and console have **no authentication and no request-size limit**. Bind
+> them somewhere you trust — this is a development and operations surface.
 
 ```bash
 curl -s localhost:3939 -d '{"jsonrpc":"2.0","id":1,"method":"similaritySearch",
@@ -271,8 +303,8 @@ with checkpointing, content-digest–verified snapshots, replay-time access
 control, tombstone deletes, atomically committed checkpoints, and signed
 snapshot manifests. Remaining: snapshot *distribution* — serving and fetching a
 peer's checkpoint, so a new node can join without replaying from genesis — plus
-`delete`/`stats` over RPC and horizontal scale-out (sharding a collection across
-nodes).
+`delete` over RPC, authentication on the RPC surface, and horizontal scale-out
+(sharding a collection across nodes).
 
 Everything above is exercised offline. The 0G-facing half (`ZeroGSource`) has no
 test coverage and has not been run against Galileo since the tag moved to v2 —

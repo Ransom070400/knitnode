@@ -3,6 +3,7 @@ export { KnitStore, type KnitStoreOpts } from './store.js';
 export { CollectionIndex } from './index-store.js';
 export { ReplayEngine, type ReplayWrite, type ReplayEngineOpts } from './replay/engine.js';
 export type { ReplaySource, LogSubmission } from './replay/source.js';
+export { MemorySource } from './replay/memory.js';
 export { ZeroGSource, type ZeroGSourceOpts } from './replay/zerog.js';
 export {
   AccessControlSet,

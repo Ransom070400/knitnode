@@ -322,16 +322,19 @@ export class KnitNode {
         );
       }
       this.collections.set(entry.name, index);
-      this.applied += index.size;
       loaded.push(entry);
     }
+    // Deliberately not folded into `applied`: that counts writes this process
+    // replayed, and a restored entry was replayed by whoever wrote the
+    // snapshot. Conflating them made a resumed node report work it never did.
+    const restored = [...this.collections.values()].reduce((n, c) => n + c.size, 0);
     // Record what's on disk, so the next save either reuses this generation or
     // counts past it — never overwrites the one we just loaded. `loaded` rather
     // than `manifest.collections` because snapshots we skipped are not ours to
     // keep vouching for.
     this.committed = { generation: manifest.generation, collections: loaded };
     this.log(
-      `resumed from checkpoint — block ${manifest.nextBlock}, ${this.collections.size} collection(s), ${this.applied} entries`,
+      `resumed from checkpoint — block ${manifest.nextBlock}, ${this.collections.size} collection(s), ${restored} entries`,
     );
     return {
       nextBlock: manifest.nextBlock,
@@ -403,6 +406,23 @@ export class KnitNode {
       throw new Error(`unknown or empty collection "${collection}"`);
     }
     return index.search(queryVector, k);
+  }
+
+  /**
+   * Replay progress alongside the per-collection stats — what an operator (or
+   * the built-in console) needs to tell "caught up and empty" apart from
+   * "still scanning".
+   */
+  status(): {
+    nextBlock: number;
+    applied: number;
+    collections: { collection: string; dim: number; size: number; metric: Metric }[];
+  } {
+    return {
+      nextBlock: this.engine.nextBlock,
+      applied: this.applied,
+      collections: this.stats(),
+    };
   }
 
   /** Introspection for the RPC `collections` method. */

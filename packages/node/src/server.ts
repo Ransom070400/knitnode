@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { KnitNode } from './knitnode.js';
+import { UI_HTML } from './ui.js';
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -13,14 +14,29 @@ interface JsonRpcRequest {
  * is enough for Phase 1. Methods:
  *   - similaritySearch({ collection, queryVector, k }) -> SearchHit[]
  *   - collections() -> stats[]
+ *   - status() -> { nextBlock, applied, collections }
  *
- * Also serves GET /health for liveness checks.
+ * `GET /` serves a browser console, and `GET /health` a liveness check. The
+ * console is served here rather than shipped separately so it is same-origin
+ * with the RPC it calls: nothing to configure, no CORS, no second process.
+ *
+ * There is no authentication and no request-size limit. Bind it somewhere you
+ * trust — this is a development and operations surface, not a public one.
  */
 export function startRpcServer(node: KnitNode, port: number): Server {
   const server = createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok' }));
+    if (req.method === 'GET') {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+      if (req.url === '/' || req.url === '/index.html') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(UI_HTML);
+        return;
+      }
+      res.writeHead(404).end();
       return;
     }
     if (req.method !== 'POST') {
@@ -68,6 +84,8 @@ function dispatch(node: KnitNode, rpc: JsonRpcRequest): unknown {
     }
     case 'collections':
       return node.stats();
+    case 'status':
+      return node.status();
     default:
       throw new Error(`unknown method "${rpc.method}"`);
   }
